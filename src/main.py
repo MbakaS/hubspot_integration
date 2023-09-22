@@ -1,4 +1,4 @@
-from  database import SerialsDB,ContactsDB,insertHubspotID
+from  database import SerialsDB,ContactsDB
 from hubspot import ContactsHS,SerialsHS
 
 
@@ -10,9 +10,10 @@ try:
         print("No new contacts found")
     else:
         hubspotids= ContactsHS("POST",contacts)
-        insertHubspotID("contacts",hubspotids)
+        ContactsDB("POST",payload=hubspotids)
 except:
     print("An error occurred adding contacts")
+
 
 #updating serials workflow
 try:

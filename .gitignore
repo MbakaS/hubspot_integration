@@ -1,4 +1,3 @@
-src/constants.py
 src/.env
 stripe.py
 workspaces.py

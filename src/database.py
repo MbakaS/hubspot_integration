@@ -26,6 +26,17 @@ def ContactsDB(action, task=None,payload=None):
             except Exception as get_exception:
                 print(f"Error in Contacts (GET): {get_exception}")
                 return []
+        elif action == "POST":
+            print("Inserting new contact HubSpot IDs")
+            try:
+                query = 'insert into hubspot_integration.contacts ("hubspotID", email, created) values (%s, %s, %s)'
+                for contact in payload:
+                    action = "UPDATE"
+                    current_time = str(datetime.datetime.now())
+                    values = (contact[1], contact[0], current_time)
+                    db.conn(action, query, values)
+            except Exception as get_exception:
+                  print(f"Error in insertHubspotID (contacts): {get_exception}")
 
         # Handle DELETE action
         elif action == "DELETE":
@@ -186,42 +197,3 @@ def SerialsDB(action, task=None,payload=None):
 # result = Serials("ASSOCIATE", task="POST", payload=["serial1", "serial2"])
 # result = Serials("DELETE", task="query", payload="hubspotID='123'")
 # result = Serials("DELETE", task="list", payload=["serial1", "serial2"])
-
-
-import datetime
-
-def insertHubspotID(table, payload):
-    try:
-        # Insert HubSpot IDs for contacts
-        if table == "contacts":
-            print("Inserting new contact HubSpot IDs")
-            try:
-                query = 'insert into hubspot_integration.contacts ("hubspotID", email, created) values (%s, %s, %s)'
-                for contact in payload:
-                    action = "UPDATE"
-                    current_time = str(datetime.datetime.now())
-                    values = (contact[1], contact[0], current_time)
-                    db.conn(action, query, values)
-            except Exception as get_exception:
-                  print(f"Error in insertHubspotID (contacts): {get_exception}")
-
-        # Insert HubSpot IDs for serials
-        elif table == "serials":
-            print("Inserting new serial HubSpot IDs")
-            try:
-                query = 'insert into hubspot_integration.serials ("hubspotID", serial, created) values (%s, %s, %s)'
-                for serial in payload:
-                    action = "update"
-                    current_time = str(datetime.datetime.now())
-                    values = (serial[1], serial[0], current_time)
-                    db.conn(action, query, values)
-                print("New serial HubSpot IDs inserted")
-            except Exception as get_exception:
-                  print(f"Error in insertHubspotID (contacts): {get_exception}")
-
-    except Exception as e:
-        print(f"An error occurred: {str(e)}")
-
-# Example usage:
-# insert_hubspot_id("contacts", [("contact1@example.com", "hubspot_id_1"), ("contact2@example.com", "hubspot_id_2")])
-# insert_hubspot_id("serials", [("serial1", "hubspot_id_1"), ("serial2", "hubspot_id_2")])
