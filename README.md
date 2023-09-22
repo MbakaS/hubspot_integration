@@ -13,7 +13,7 @@ In HubSpot, we manage four object schemas: Contacts, Serials, Workspaces, and Me
 `Delete` objects that are no longer needed in Hubspot. 
 
 
-## hubspot_ntegration Schema
+## hubspot_integration Schema
 We internally retain the HubSpot ID of an object once it is generated. These IDs are stored within the hubspot_integration schema, part of our analytics schema. They serve as a means for us to interface with the HubSpot API seamlessly. Within this schema, we have established four distinct tables, each dedicated to one of the objects we oversee within HubSpot.
 
 # Requirements to run it
