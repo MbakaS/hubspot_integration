@@ -1,199 +1,207 @@
-import db 
+""" Contains all hubspot operations"""
 import datetime
+import postgres as db
 
 
-def ContactsDB(action, task=None,payload=None):
+def get_contacts():
+    """
+    Fetch new contacts from the database.
+
+    This function retrieves new contacts from the cloud.Users table whose "createdAt" timestamp
+    is greater than the last synchronization timestamp obtained 
+    from the hubspot_integration.contacts table.
+
+    Returns:
+        list: A list of new contacts, each represented as a tuple (email, name).
+    """
     try:
-        # Check for valid action
-        if action not in ('GET', 'DELETE'):
-            raise ValueError("Invalid contact action parameter")
+        # Fetch the last sync timestamp from the database
+        last_sync_query = 'select max(created) from hubspot_integration.contacts'
+        last_sync_timestamp = db.conn("GET", last_sync_query, None)
+        value = last_sync_timestamp[0]
 
-        # Handle GET action
-        if action == "GET":
-            try:
-                # Fetch the last sync timestamp from the database
-                value=None
-                last_sync_query = 'select max(created) from hubspot_integration.contacts'
-                last_sync_timestamp = db.conn(action, last_sync_query, value)
-                value = last_sync_timestamp[0]
-
-                # Fetch new contacts from cloud.Users table
-                user_query = 'select email, name from cloud."Users" where "createdAt" > %s and email is not null order by "createdAt" asc limit 30'
-                
-                new_contacts = db.conn(action, user_query, value)
-                return new_contacts
-
-            except Exception as get_exception:
-                print(f"Error in Contacts (GET): {get_exception}")
-                return []
-        elif action == "POST":
-            print("Inserting new contact HubSpot IDs")
-            try:
-                query = 'insert into hubspot_integration.contacts ("hubspotID", email, created) values (%s, %s, %s)'
-                for contact in payload:
-                    action = "UPDATE"
-                    current_time = str(datetime.datetime.now())
-                    values = (contact[1], contact[0], current_time)
-                    db.conn(action, query, values)
-            except Exception as get_exception:
-                  print(f"Error in insertHubspotID (contacts): {get_exception}")
-
-        # Handle DELETE action
-        elif action == "DELETE":
-            if task not in ("query", "list"):
-                raise ValueError("Invalid deletion task type")
-            try:
-                # Execute either a query or a list-based deletion
-               if task == 'query':
-                  
-                  # Get hubspotIDs to correspond deletion with Hubspot 
-                try:
-                    query = f'select "hubspotID" from hubspot_integration.contacts where {payload}'
-                    new_action= "GET"
-                    serials = db.conn(new_action,query,payload)
-                    print(serials)
-                  
-                    # Delete Serials from DB on if we have successfully retrieved Hubspot IDs
-                    query = f'delete from hubspot_integration.contacts where {payload}'
-                    db.conn(action, query, None)
-                except Exception as get_exception:
-                     print(f"Error in getting HubspotIDs (GET): {get_exception}")   
-                return serials
-            
-               elif task == 'list':
-                  try:
-                     # Get hubspotIDs to correspond deletion with Hubspot 
-                     query = 'select "hubspotID" from hubspot_integration.serials where serial in %s'
-                     new_action= "GET"
-                     serials = db.conn(new_action,query,(tuple(payload),))
-                  except Exception as get_exception:
-                     print(f"Error in getting HubspotIDs (GET): {get_exception}")
-                  
-                  # Delete Serials from DB on if we have successfully retrieved Hubspot IDs
-                  if serials is not None:
-                     query = "delete from hubspot_integration.contacts where email = %s"
-                     for contact_email in payload:
-                        db.conn(action, query, (contact_email,))
-                  return serials
-
-            except Exception as delete_exception:
-                print(f"Error in Contacts (DELETE): {delete_exception}")
-                return []
-
-    except ValueError as value_error:
-        print(f"ValueError in Contacts: {value_error}")
-        return []
-    
-    except Exception as generic_exception:
-        print(f"Unhandled Exception in Contacts: {generic_exception}")
-        return []
-
-# Example usage:
-# result = Contacts("GET")
-# result = Contacts("DELETE", payload=["contact1@example.com", "contact2@example.com"], task="list")
-# result = Contacts("DELETE", payload=["contact1@example.com", "contact2@example.com"], task="list")
+        # Fetch new contacts from cloud.Users table
+        user_query = 'select email, name from cloud."Users" where "createdAt" > %s and email is not null order by "createdAt" asc limit 10'
+        new_contacts = db.conn("GET", user_query, value)
+    except Exception as get_exception:
+        print(f"Error in Contacts (GET): {get_exception}")
+    return new_contacts
 
 
+def insert_contact_ids(hubspotids):
+    """
+    Insert HubSpot contact IDs into the database.
 
+    Args:
+        hubspotids (list): A list of tuples containing HubSpot contact IDs, 
+        email addresses, and created timestamps.
 
-
-
-
-def SerialsDB(action, task=None,payload=None):
+    Returns:
+        None
+    """
     try:
-        # Handle GET action to retrieve new serials
-        if action == "GET":
-            try:
-               print("Getting new serials")
-               query = "select max(created) from hubspot_integration.serials"
-               last_sync = db.conn(action, query,None)
-               query = 'select s.serial, s.email, s.date as created, s.id, s."maxUse", to_timestamp(s.update_expirationdate::double precision), contacts."hubspotID" from licensing.serials s left join hubspot_integration.contacts on  s.email= contacts.email where to_timestamp(date::double precision)::date > %s  and contacts.email is not null order by s.date asc limit 30'
-               new_serials = db.conn(action, query, last_sync)
-               print("New serials retrieved from DB")
-               return new_serials
-            except Exception as get_exception:
-                print(f"Error in Serials (GET): {get_exception}")
+        query = 'insert into hubspot_integration.contacts ("hubspotID", email, created) values (%s, %s, %s)'
+        # Iterate through the list of HubSpot contact IDs and insert them into the database
+        for contact in hubspotids:
+            current_time = str(datetime.datetime.now())
+            values = (contact[0], contact[1], current_time)
+            db.conn("UPDATE", query, values)
+    except Exception as get_exception:
+        print(f"Error in insertHubspotID (contacts): {get_exception}")  # Handle any exceptions
 
-        # Handle UPDATED action to retrieve updated serials
-        elif action == "UPDATE":
-            # Run this before updating associations because they both rely on the updated column
-            print("Getting updated serials")
-            try:
-               query = "select min(updated) from hubspot_integration.serials"
-               last_sync = db.conn("GET", query,None)
-               print(last_sync)
-               query = 'select s.serial, s.email, s.date as created, hb."hubspotID", s.id, s."maxUse", to_timestamp(s.update_expirationdate::double precision) from licensing.serials s left join hubspot_integration.serials hb on s.serial=hb.serial where hb."hubspotID" is not null and s.last_updated_on > %s limit 50'
-               updated_serials = db.conn("GET", query, last_sync)
-               print("Updated serials retrieved from DB")
-               return updated_serials
-            except Exception as get_exception:
-               print(f"Error in Serials (UPDATED): {get_exception}")
 
-        # Handle ASSOCIATE action (GET and POST)
-        elif action == "ASSOCIATE":
-               print("DB call for serial contacts association")
-               serials = []
-               for serial in payload:
-                   serials.append(serial[0])
-               try:
-                  print(f"Serial for association{tuple(serials)}")
-                  query = f'select s."hubspotID" as serial, c."hubspotID" as contact from hubspot_integration.serials s left join licensing.serials ls on s.serial = ls.serial left join hubspot_integration.contacts c on ls.email = c.email  where s.updated is null and c."hubspotID" is not null and s.serial in {tuple(serials)}'
-                  data = db.conn("GET", query,None)
-                  print("Serials for associations retrieved")
-                  print (data)
-               except Exception as get_exception:
-                  print(f"Error in Serials (Associate GET): {get_exception}")
-               return data
+def delete_contacts(contacts):
+    """
+    Delete contacts from the database.
 
-        # Handle DELETE action (query and list)
-        elif action == "DELETE":
-            if task == "query":
-               print("Retrieving hubspotIDs to correspond deletion on Hubspot")
-               try:
-                  query = f'select "hubspotID" from hubspot_integration.serials where {payload}'
-                  serials = db.conn("get", query, payload)
-                                    
-                  # Delete Serials from DB on if we have successfully retrieved Hubspot IDs
-                  if serials is not None:
-                     query = f'delete from hubspot_integration.serials where {payload}'
-                     db.conn(action, query, payload)
-                     print("Deletion query executed")
-                     return serials
-               except Exception as get_exception:
-                  print(f"Error in Serials (DELETE): {get_exception}")
-            elif task == "list":
-               try:
-                  query = 'select "hubspotID" from hubspot_integration.serials where serial in %s'
-                  serials = db.conn("get", query, (tuple(payload),))
+    Args:
+        contacts (list): A list of email addresses to delete.
 
-                  print("Serials deleted")
-                  query = 'delete from hubspot_integration.serials where serial = %s'
-                  for serial in payload:
-                     db.conn(action, query, (serial,))
-               except Exception as get_exception:
-                  print(f"Error in Serials (DELETE): {get_exception}")
+    Returns:
+        list: A list of HubSpot contact IDs corresponding to the deleted contacts.
+    """
+    try:
+        # Query the database to retrieve HubSpot IDs for the given contacts
+        query = 'select "hubspotID" from hubspot_integration.contacts where email = ANY(%s)'
+        contact_ids = db.conn("GET", query, (contacts,))
+        # Delete the contacts from both the database
+        for contact in contacts:
+            db_query = 'delete from hubspot_integration.contacts where email = %s'
+            print(contact)
+            db.conn("DELETE", db_query, (contact,))
+    except Exception as get_exception:
+        print(f"Error in deleting HubSpotIDs (GET): {get_exception}")
+    return contact_ids
 
-        elif action == "POST":
-            print("Inserting new serial HubSpot IDs")
-            try:
-                query = 'insert into hubspot_integration.serials ("hubspotID", serial, created) values (%s, %s, %s)'
-                for serial in payload:
-                    action = "UPDATE"
-                    values = (int(serial[1]), serial[0], serial[2])
-                    print(values)
-                    db.conn(action, query, values)
-                print("New serial HubSpot IDs inserted")
-            except Exception as get_exception:
-                  print(f"Error in insertHubspotID (contacts): {get_exception}")
-    except Exception as e:
-        print(f"An error occurred: {str(e)}")
+def get_serials():
+    """
+    Retrieve new serials from the database based on the last synchronization timestamp.
 
-    return []
+    Returns:
+        list: A list of dictionaries representing the new serials.
+    """
+    try:
+        print("Getting new serials")
+        # Query to retrieve the last sync timestamp from the database
+        last_sync_query = "select max(created) from hubspot_integration.serials"
+        last_sync = db.conn("GET", last_sync_query, None)
+        # Query to retrieve new serials from the database
+        serials_query = """
+        select
+            s.serial,
+            s.email,
+            s.date as created,
+            s.id,
+            s."maxUse",
+            to_timestamp(s.update_expirationdate::double precision),
+            contacts."hubspotID"
+        from
+            licensing.serials s
+        left join
+            hubspot_integration.contacts
+        on
+            s.email = contacts.email
+        where
+            to_timestamp(date::double precision)::date > %s
+            and contacts.email is not null
+        order by
+            s.date asc
+        limit
+            30
+        """
+        new_serials = db.conn("GET", serials_query, last_sync)
+        print("New serials retrieved from DB")
+    except Exception as get_exception:
+        print(f"Error in Serials (GET): {get_exception}")
+    return new_serials
 
-# Example usage:
-# result = Serials("GET_NEW")
-# result = Serials("GET_UPDATED")
-# result = Serials("ASSOCIATE", task="GET")
-# result = Serials("ASSOCIATE", task="POST", payload=["serial1", "serial2"])
-# result = Serials("DELETE", task="query", payload="hubspotID='123'")
-# result = Serials("DELETE", task="list", payload=["serial1", "serial2"])
+def get_updated_serials():
+    """
+    Retrieve updated serials from the database based on the last synchronization timestamp.
+    Run this before updating associations because they both rely on the updated column
+
+    Returns:
+        list: A list of dictionaries representing the updated serials.
+    """
+    print("Getting updated serials")
+    try:
+        # Query to retrieve the minimum updated timestamp from the database
+        query = "select min(updated) from hubspot_integration.serials"
+        last_sync = db.conn("GET", query, None)
+        # Query to retrieve updated serials from the database
+        query = """
+        select
+            s.serial,
+            s.email,
+            s.date as created,
+            hb."hubspotID",
+            s.id,
+            s."maxUse",
+            to_timestamp(s.update_expirationdate::double precision)
+        from
+            licensing.serials s
+        left join
+            hubspot_integration.serials hb
+        on
+            s.serial = hb.serial
+        where
+            hb."hubspotID" is not null
+            and s.last_updated_on > %s
+        limit
+            10
+        """
+        updated_serials = db.conn("GET", query, last_sync)
+        print("Updated serials retrieved from DB")
+    except Exception as get_exception:
+        print(f"Error in Serials (UPDATED): {get_exception}")
+    return updated_serials
+
+def insert_serial_ids(hubspotids):
+    """
+    Insert new HubSpot IDs for serials into the database.
+
+    Args:
+        hubspotids (list): A list of tuples containing HubSpot ID, serial, and created date.
+
+    Returns:
+        None
+    """
+    print("Inserting new serial HubSpot IDs")
+    try:
+        # Define the SQL query for inserting data
+        query = 'insert into hubspot_integration.serials ("hubspotID", serial, created) values (%s, %s, %s)'
+        # Iterate over the provided HubSpot IDs
+        for serial in hubspotids:
+            values = (int(serial[0]), serial[1], serial[2])
+            db.conn("UPDATE", query, values)
+        print("New serial HubSpot IDs inserted")
+    except Exception as get_exception:
+        print(f"Error in insertHubspotID (contacts): {get_exception}")
+    print("Serial IDs added to the database")
+
+
+def delete_serial_ids(serials):
+    """
+    Delete HubSpot IDs associated with serials from the database.
+
+    Args:
+        serials (list): A list of serials to be deleted.
+
+    Returns:
+        list: A list of HubSpot IDs that were deleted.
+    """
+    print("Retrieving HubSpot IDs to correspond deletion on HubSpot")
+    try:
+        # Query to retrieve HubSpot IDs for the provided serials
+        query = 'select "hubspotID" from hubspot_integration.serials where serial = ANY(%s)'
+        serial_ids = db.conn("GET", query, (serials,))
+        # Check if any HubSpot IDs were retrieved
+        if serial_ids is not None:
+            query = 'delete from hubspot_integration.serials where "hubspotID" = %s'
+            # Delete each serial's HubSpot ID from the database
+            for serial_id in serial_ids:
+                db.conn("DELETE", query, serial_id)
+            print("Serial IDs deleted from the database")
+    except Exception as get_exception:
+        print(f"Error in Serials (DELETE): {get_exception}")
+    return serial_ids
