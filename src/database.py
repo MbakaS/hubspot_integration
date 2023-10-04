@@ -1,5 +1,4 @@
 """ Contains all hubspot operations"""
-import datetime
 import postgres as db
 
 
@@ -9,23 +8,30 @@ def get_contacts():
 
     This function retrieves new contacts from the cloud.Users table whose "createdAt" timestamp
     is greater than the last synchronization timestamp obtained 
-    from the hubspot_integration.contacts table.
+    from the contacts table.
 
     Returns:
         list: A list of new contacts, each represented as a tuple (email, name).
     """
     try:
         # Fetch the last sync timestamp from the database
-        last_sync_query = 'select max(created) from hubspot_integration.contacts'
-        last_sync_timestamp = db.conn("GET", last_sync_query, None)
-        value = last_sync_timestamp[0]
+        last_sync_query = 'select max(created) from contacts'
+        last_sync_timestamp = db.analytics_db("GET",last_sync_query, None)
 
         # Fetch new contacts from cloud.Users table
-        user_query = 'select email, name from cloud."Users" where "createdAt" > %s and email is not null order by "createdAt" asc limit 10'
-        new_contacts = db.conn("GET", user_query, value)
+        user_query = 'select email, "createdAt",name from "Users" where "createdAt" > %s   order by "createdAt" asc limit 50'
+        cloud_users = db.cloud_db(user_query,last_sync_timestamp[0])
+
+        #fetch new users from Serials
+        last_sync_query = "select max(created) from serials"
+        last_sync = db.analytics_db("GET",last_sync_query, None)
+        unix_timestamp = int(last_sync[0][0].timestamp())
+        user_licenses = f"select email,FROM_UNIXTIME(date) as date from serials where date > '{unix_timestamp}' limit 50 "
+        serial_users = db.legacy_db(user_licenses,None)
+        print("SUCCESS: New contacts retrieved from Database")
     except Exception as get_exception:
         print(f"Error in Contacts (GET): {get_exception}")
-    return new_contacts
+    return cloud_users+serial_users
 
 
 def insert_contact_ids(hubspotids):
@@ -40,15 +46,15 @@ def insert_contact_ids(hubspotids):
         None
     """
     try:
-        query = 'insert into hubspot_integration.contacts ("hubspotID", email, created) values (%s, %s, %s)'
+        query = 'insert into contacts ("hubspotID", email, created) values (%s, %s, %s)'
         # Iterate through the list of HubSpot contact IDs and insert them into the database
         for contact in hubspotids:
-            current_time = str(datetime.datetime.now())
-            values = (contact[0], contact[1], current_time)
-            db.conn("UPDATE", query, values)
+                     
+            values = (int(contact[1]), contact[0], contact[2])
+            db.analytics_db("UPDATE", query, values)
     except Exception as get_exception:
         print(f"Error in insertHubspotID (contacts): {get_exception}")  # Handle any exceptions
-
+    print("SUCCESS: Contacts succesfully added to the DB")
 
 def delete_contacts(contacts):
     """
@@ -61,17 +67,13 @@ def delete_contacts(contacts):
         list: A list of HubSpot contact IDs corresponding to the deleted contacts.
     """
     try:
-        # Query the database to retrieve HubSpot IDs for the given contacts
-        query = 'select "hubspotID" from hubspot_integration.contacts where email = ANY(%s)'
-        contact_ids = db.conn("GET", query, (contacts,))
         # Delete the contacts from both the database
-        for contact in contacts:
-            db_query = 'delete from hubspot_integration.contacts where email = %s'
-            print(contact)
-            db.conn("DELETE", db_query, (contact,))
+        contact_list = ', '.join([f"'{contact[0]}'" for contact in contacts])
+        db_query = f'delete from contacts where "hubspotID" in ({contact_list})'
+        db.analytics_db("DELETE", db_query, None)
     except Exception as get_exception:
         print(f"Error in deleting HubSpotIDs (GET): {get_exception}")
-    return contact_ids
+    return True
 
 def get_serials():
     """
@@ -81,39 +83,53 @@ def get_serials():
         list: A list of dictionaries representing the new serials.
     """
     try:
-        print("Getting new serials")
+        print("START: Getting new serials")
+        joined_list = []
         # Query to retrieve the last sync timestamp from the database
-        last_sync_query = "select max(created) from hubspot_integration.serials"
-        last_sync = db.conn("GET", last_sync_query, None)
+        last_sync_query = "select max(created) from serials"
+        last_sync = db.analytics_db("GET",last_sync_query, None)
         # Query to retrieve new serials from the database
-        serials_query = """
-        select
-            s.serial,
-            s.email,
-            s.date as created,
-            s.id,
-            s."maxUse",
-            to_timestamp(s.update_expirationdate::double precision),
-            contacts."hubspotID"
-        from
-            licensing.serials s
-        left join
-            hubspot_integration.contacts
-        on
-            s.email = contacts.email
-        where
-            to_timestamp(date::double precision)::date > %s
-            and contacts.email is not null
-        order by
-            s.date asc
-        limit
-            30
+        serials_query = f"""
+                        select
+                            s.serial,
+                            s.email,
+                            s.date as created,
+                            s.id,
+                            s.maxUse,
+                            s.update_expirationdate
+                            from
+                                serials s
+                            where s.date > UNIX_TIMESTAMP('{last_sync[0][0]}')
+                            order by
+                                s.date asc
+                            limit
+                                50
         """
-        new_serials = db.conn("GET", serials_query, last_sync)
-        print("New serials retrieved from DB")
+        new_serials = db.legacy_db(serials_query,None)
+        serial_list = ', '.join([f"'{serial[1]}'" for serial in new_serials])
+        if serial_list =="":
+            print("DB: No New Serials")
+        else:
+            # Query to retrieve contact hubspot ids
+            hubspotids_query = f'select email,"hubspotID" from contacts where email in ({serial_list})'
+            hubspotids = db.analytics_db("GET",hubspotids_query, None)
+            if hubspotids == []:
+                print("NOTE: Serial contacts not yet added to hubspot")
+            else:
+                # Create a dictionary mapping email addresses to hubspot IDs
+                hubspot_dict = {email: hubspot_id for email, hubspot_id in hubspotids}
+
+                # Join the two lists based on email addresses
+                
+                for serial in new_serials:
+                    email = serial[1]  # Assuming email is at index 1 in the new_serials tuples
+                    hubspot_id = hubspot_dict.get(email, None)
+                    if hubspot_id is not None:
+                        joined_list.append((*serial, hubspot_id))  # Assuming you want to add hubspot_id to the new_serials tuples
+    
     except Exception as get_exception:
         print(f"Error in Serials (GET): {get_exception}")
-    return new_serials
+    return joined_list
 
 def get_updated_serials():
     """
@@ -123,38 +139,48 @@ def get_updated_serials():
     Returns:
         list: A list of dictionaries representing the updated serials.
     """
-    print("Getting updated serials")
+    print("START: Getting updated serials")
+    final = []
     try:
         # Query to retrieve the minimum updated timestamp from the database
-        query = "select min(updated) from hubspot_integration.serials"
-        last_sync = db.conn("GET", query, None)
+        query = "select max(created) from serials"
+        last_sync = db.analytics_db( "GET",query, None)
         # Query to retrieve updated serials from the database
-        query = """
+        query = f"""
         select
             s.serial,
             s.email,
             s.date as created,
-            hb."hubspotID",
             s.id,
-            s."maxUse",
-            to_timestamp(s.update_expirationdate::double precision)
+            s.maxUse,
+            s.update_expirationdate
         from
-            licensing.serials s
-        left join
-            hubspot_integration.serials hb
-        on
-            s.serial = hb.serial
-        where
-            hb."hubspotID" is not null
-            and s.last_updated_on > %s
-        limit
-            10
+            serials s
+            where last_updated_on > '{last_sync[0][0]}'
+
         """
-        updated_serials = db.conn("GET", query, last_sync)
-        print("Updated serials retrieved from DB")
+        updated_serials = db.legacy_db( query, None)
+        print("SUCCESS: Updated serials retrieved from DB")
+        serial_list = ', '.join([f"'{serial[0]}'" for serial in updated_serials])
+        if serial_list =="":
+            print("No New Serials")
+        else:
+            # Query to retrieve contact hubspot ids
+            hubspotids_query = f'select serial,"hubspotID" from serials where serial in ({serial_list})'
+            hubspotids = db.analytics_db("GET",hubspotids_query, None)
+        # Create a dictionary mapping email addresses to hubspot IDs
+            hubspot_dict = {serial: hubspot_id for serial, hubspot_id in hubspotids}
+            # Join the two lists based on email addresses
+            for serial in updated_serials:
+                serialid = serial[0]  # Assuming email is at index 1 in the new_serials tuples
+                hubspot_id = hubspot_dict.get(serialid, None)
+                if hubspot_id is not None:
+                    final.append((*serial, hubspot_id))  # Assuming you want to add hubspot_id to the new_serials tuples
+
+
     except Exception as get_exception:
         print(f"Error in Serials (UPDATED): {get_exception}")
-    return updated_serials
+    return final
 
 def insert_serial_ids(hubspotids):
     """
@@ -166,18 +192,17 @@ def insert_serial_ids(hubspotids):
     Returns:
         None
     """
-    print("Inserting new serial HubSpot IDs")
+    print("START: Inserting new serial HubSpot IDs")
     try:
         # Define the SQL query for inserting data
-        query = 'insert into hubspot_integration.serials ("hubspotID", serial, created) values (%s, %s, %s)'
+        query = 'insert into serials ("hubspotID", serial, created) values (%s, %s, %s)'
         # Iterate over the provided HubSpot IDs
         for serial in hubspotids:
             values = (int(serial[0]), serial[1], serial[2])
-            db.conn("UPDATE", query, values)
-        print("New serial HubSpot IDs inserted")
+            db.analytics_db("UPDATE", query, values)
+        print("SUCCESS: New serial HubSpot IDs inserted")
     except Exception as get_exception:
-        print(f"Error in insertHubspotID (contacts): {get_exception}")
-    print("Serial IDs added to the database")
+        print(f"Error in insertHubspotID (serials): {get_exception}")
 
 
 def delete_serial_ids(serials):
@@ -190,18 +215,14 @@ def delete_serial_ids(serials):
     Returns:
         list: A list of HubSpot IDs that were deleted.
     """
-    print("Retrieving HubSpot IDs to correspond deletion on HubSpot")
+    print("START: Deleting serials on DB")
     try:
         # Query to retrieve HubSpot IDs for the provided serials
-        query = 'select "hubspotID" from hubspot_integration.serials where serial = ANY(%s)'
-        serial_ids = db.conn("GET", query, (serials,))
-        # Check if any HubSpot IDs were retrieved
-        if serial_ids is not None:
-            query = 'delete from hubspot_integration.serials where "hubspotID" = %s'
-            # Delete each serial's HubSpot ID from the database
-            for serial_id in serial_ids:
-                db.conn("DELETE", query, serial_id)
-            print("Serial IDs deleted from the database")
+        serial_list = ', '.join([f"{serial}" for serial in serials])
+        query = f'delete from serials where "hubspotID" in ({serial_list})'
+        db.analytics_db("DELETE", query, None)
+        print("SUCCESS: Serial IDs deleted from the database")
     except Exception as get_exception:
         print(f"Error in Serials (DELETE): {get_exception}")
-    return serial_ids
+    return True
+

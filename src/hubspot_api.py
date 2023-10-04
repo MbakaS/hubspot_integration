@@ -1,13 +1,16 @@
 """ This module contains all API funtions to Hubspot """
 import datetime
+import os
 from hubspot import HubSpot
 from hubspot.crm.contacts import SimplePublicObjectInputForCreate,BatchInputSimplePublicObjectId
 from hubspot.crm.contacts.exceptions import ApiException
 from hubspot.crm.objects import SimplePublicObjectInputForCreate
 from hubspot.crm.associations.v4 import BatchInputPublicDefaultAssociationMultiPost
-from constants import TOKEN
-from  database import SerialsDB
+from dotenv import load_dotenv, find_dotenv
 
+# Load environment variables from a .env file
+load_dotenv(find_dotenv())
+token = os.getenv('TOKEN')
 
 def create_contacts(contacts):
     """
@@ -20,25 +23,24 @@ def create_contacts(contacts):
     Returns:
         list: A list of tuples with the original email and the contact HubSpot ID .
     """
-
-    api_client = HubSpot()
-    api_client.access_token = TOKEN
+    print("START: adding contacts to hubspot...")
+    api_client = HubSpot(access_token=token)
     hubspot_records = []
     for contact in contacts:
         try:
             payload = SimplePublicObjectInputForCreate(
-                properties={"email": contact}
+                properties={
+                    "email": contact[0]
+                            }
             )
             api_response = api_client.crm.contacts.basic_api.create(
                 simple_public_object_input_for_create=payload
             )
-            print(api_response)
-            hubspot_records = [(contact,api_response.id)]
-        except ApiException as error:
-            print(f"Exception when creating contact: {error}\n")
 
-    print("Returns a list to be added to the DB")
-    print(hubspot_records)
+            hubspot_records = hubspot_records+[(contact[0],api_response.id,contact[1])]
+        except ApiException as error:
+            print(f"Exception when creating contact: {contact[0]}")
+    print("END: Contacts Added...")
     return hubspot_records
 
 def delete_contacts(contacts):
@@ -52,7 +54,7 @@ def delete_contacts(contacts):
         list: True or False.
     """
     api_client = HubSpot()
-    api_client.access_token = TOKEN
+    api_client.access_token = token
 
     for contact in contacts:
         try:
@@ -79,11 +81,11 @@ def delete_batch_contacts(contacts):
         None: if the delete operation was successful, Error otherwise.
     """
     api_client = HubSpot()
-    api_client.access_token = TOKEN
+    api_client.access_token = token
     try:
         payload = []
         for contact in contacts:
-            id= {"id": contact}
+            id= {"id": contact[0]}
             payload.append(id)
         # Create a BatchInputSimplePublicObjectId instance
         batch_input = BatchInputSimplePublicObjectId(inputs=payload)
@@ -99,7 +101,7 @@ def delete_batch_contacts(contacts):
             else:
                 print(f"Failed to delete contacts. Status code: {api_response.status_code}")
         else:
-            print("Contacts Deleted")    
+            print("SUCCESS: Contacts Deleted ")    
     except ApiException as error:
         print(f"Exception when deleting contacts: {error}\n")
     return False
@@ -117,11 +119,11 @@ def create_serials(serials):
         list: A list of tuples with serial information including the HubSpot ID and
         the creation date.
     """
-    print("Adding new serials to HubSpot")
+    print("START: Adding new serials to HubSpot")
     api_client = HubSpot()
-    api_client.access_token = TOKEN
+    api_client.access_token = token
     hubspot_records = []
-
+    hubspot_associations = []
     for serial in serials:
         created = int(serial[2])
         date_obj = datetime.datetime.utcfromtimestamp(created)
@@ -146,26 +148,28 @@ def create_serials(serials):
             )
 
             # Append the serial information including HubSpot ID and creation date to the list
-            hubspot_records.append(
-                {"from":{"id":api_response.id},"to":{"id":25784012}}
+            hubspot_associations.append(
+                {"from":{"id":api_response.id},"to":{"id":serial[6]}}
 
             )
+
+            hubspot_records=hubspot_records+[(api_response.id,serial[0],iso_date_string_long)]
 
         except ApiException as error:
             print(f"Exception when creating serial: {error}\n")
     # create associations for the newly added serials
-    associations = BatchInputPublicDefaultAssociationMultiPost(inputs=hubspot_records)
+    associations = BatchInputPublicDefaultAssociationMultiPost(inputs=hubspot_associations)
     try:
         api_response = api_client.crm.associations.v4.batch_api.create_default(
             from_object_type="License", to_object_type="Contact",
             batch_input_public_default_association_multi_post=associations)
         if api_response.status == "COMPLETE":
-            print(" All serials associated with contacts")
+            print("SUCCESS: All serials associated with contacts")
         else:
             print(api_response.status)
     except ApiException as error:
         print(f"Exception when calling batch_api->Associate: {error}/n")
-    print("Successfully added serials to HubSpot")
+    print("SUCCESS: Serials added to HubSpot")
     return hubspot_records
 
 
@@ -180,9 +184,9 @@ def update_serials(serials):
     Returns:
         True
     """
-    print("Updating serials ")
+    print("START: Updating serials to hubspot")
     api_client = HubSpot()
-    api_client.access_token = TOKEN
+    api_client.access_token = token
     for serial in serials:
         created = int(serial[2])
         date_obj = datetime.datetime.utcfromtimestamp(created)
@@ -201,14 +205,14 @@ def update_serials(serials):
         try:
             # update a serial object in HubSpot
             api_client.crm.objects.basic_api.update(
-                object_id=serial[3],
+                object_id=serial[6],
                 object_type="License",
                 simple_public_object_input=update_object
             )
         except ApiException as error:
             print(f"Exception when creating serial: {error}\n")
 
-    print("Successfully updated serials")
+    print("SUCCESS: Serials update on Hubspot")
     return True
 
 
@@ -222,9 +226,9 @@ def delete_serials(serials):
     Returns:
         bool: True if the delete operation was successful, False otherwise.
     """
-    print("Deleting serials")
+    print("START: Deleting serials on Hubspot")
     api_client = HubSpot()
-    api_client.access_token = TOKEN
+    api_client.access_token = token
 
     for serial in serials:
         try:
@@ -236,5 +240,5 @@ def delete_serials(serials):
         except ApiException as error:
             print(f"Exception when deleting serial: {error}\n")
 
-    print("Successfully deleted serials")
+    print("SUCCESS: Deleted serials on Hubspot")
     return True
