@@ -77,14 +77,15 @@ def payments_db(query, values):
             'user': os.getenv('PAYMENTS_USER'),
             'password': os.getenv('PAYMENTS_PASSWORD'),
             'host': os.getenv('PAYMENTS_HOST'),
+            'port': os.getenv('PAYMENTS_PORT'),
         }
-        conn = psycopg2.connect(**params)
+        conn = psycopg2.connect(**params, cursor_factory=psycopg2.extras.DictCursor)
         cur = conn.cursor()
         cur.execute(query, values)
+        conn.commit()
         response = cur.fetchall()
-        cur.close()
     except (Exception, psycopg2.DatabaseError) as error:
-        print(f"Error in Payments DB connection: {error}")
+        print(f"Error in CLOUD database connection: {error}")
     finally:
         if conn is not None:
             conn.close()
