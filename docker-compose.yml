@@ -1,28 +1,6 @@
 version: '3.8'
 
 services:
-  postgres:
-    image: postgres:latest
-    container_name: cloud
-    environment:
-      POSTGRES_DB: cloud
-      POSTGRES_USER: cloud
-      POSTGRES_PASSWORD: 12345678
-    ports:
-      - "5432:5432"
-    volumes:
-      - cloud:/var/lib/postgresql/data  
-  postgres_secondary:
-    image: postgres:latest
-    container_name: payments
-    ports:
-      - "5433:5432"  
-    environment:
-      POSTGRES_USER: payments
-      POSTGRES_PASSWORD: 12345678
-      POSTGRES_DB: payments
-    volumes:
-      - payments:/var/lib/postgresql/data
   postgres_analytics:
     image: postgres:latest
     container_name: analytics
@@ -34,22 +12,7 @@ services:
       POSTGRES_DB: analytics
     volumes:
       - analytics:/var/lib/postgresql/data
-  mysql:
-      image: mysql:latest
-      container_name: legacy
-      ports:
-        - "3306:3306"
-      environment:
-        MYSQL_ROOT_PASSWORD: 12345678
-        MYSQL_DATABASE: legacy
-        MYSQL_USER: legacy
-        MYSQL_PASSWORD: 12345678
-      volumes:
-        - legacy:/var/lib/mysql
 
 volumes:
-  legacy:
-  payments:
-  cloud:
   analytics:
 
