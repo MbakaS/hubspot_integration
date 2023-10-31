@@ -39,15 +39,17 @@ def analytics_db(action, query, values):
 
             if values is None:
                 cur.execute(query)
-                response = "Records updated"
+                conn.commit()
+                response = True
             else:
                 cur.execute(query, values)
-                response = "Records updated"
+                conn.commit()
+                response = True
 
             if action == 'GET':
                 response = cur.fetchall()
 
-            conn.commit()
+            
             cur.close()
         except (Exception, psycopg2.DatabaseError) as error:
             print(f"Error in analytics DB connection: {error}")

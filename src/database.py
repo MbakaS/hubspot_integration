@@ -5,33 +5,122 @@ def get_contacts():
     """
     Fetch new contacts from the database.
 
-    This function retrieves new contacts from the cloud.Users table whose "createdAt" timestamp
+    This function retrieves new contacts from the Users table whose "createdAt" timestamp
     is greater than the last synchronization timestamp obtained 
-    from the contacts table.
+    from the contacts table or triggers a full sync if the table is empty.
 
     Returns:
         list: A list of new contacts, each represented as a tuple (email, name).
     """
+    cloud_users = []
+    serial_users = []
+    sso_users = []
     try:
         # Fetch the last sync timestamp from the database
         last_sync_query = 'select max(created) from contacts'
         last_sync_timestamp = db.analytics_db("GET",last_sync_query, None)
+        if last_sync_timestamp[0][0] is None:
+            print("Contacts table empty, strart full Sync")
+            # create tables if they do not exist
+            db.analytics_db("ADD",'''
+                    CREATE TABLE if not exists contacts (
+                        "hubspotID" bigint PRIMARY KEY,
+                        email character varying,
+                        type character varying,
+                        created timestamp without time zone,
+                        updated timestamp without time zone
+                    )
+                    ''', None)
+            db.analytics_db("ADD",'''
+                    CREATE TABLE if not exists invalid_contacts (
+                        id serial PRIMARY KEY,
+                        email character varying
+                    )
+                    ''', None)
+            user_query = """select email, "createdAt" from "Users" where email is not null 
+            group by 1,2 order by "createdAt" asc limit 4000"""
+            cloud_users = db.cloud_db(user_query,None)
+            cloud_users = [(email, date, 'cloud') for email, date in cloud_users]
 
-        # Fetch new contacts from cloud.Users table
-        user_query = 'select email, "createdAt",name from "Users" where "createdAt" > %s   order by "createdAt" asc limit 50'
-        cloud_users = db.cloud_db(user_query,last_sync_timestamp[0])
-        print(last_sync_timestamp[0])
-        #fetch new users from Serials
-        last_sync_query = "select max(created) from serials"
-        last_sync = db.analytics_db("GET",last_sync_query, None)
-        unix_timestamp = int(last_sync[0][0].timestamp())
-        print(last_sync[0][0])
-        user_licenses = f"select email,FROM_UNIXTIME(date) as date from serials where date > '{unix_timestamp}' limit 50 "
-        serial_users = db.legacy_db(user_licenses,None)
-        print("SUCCESS: New contacts retrieved from Database")
+            sso_query = """select email, "createdAt" from "ExternalIdentities"
+            where email is not null group by 1,2 order by "createdAt" asc """
+            sso_users = db.cloud_db(sso_query,None)
+            sso_users = [(email, date, 'sso') for email, date in sso_users]
+
+            user_licenses = '''select email, max(FROM_UNIXTIME(date)) as date
+            from serials group by 1 limit 200'''
+            serial_users = db.legacy_db(user_licenses,None)
+            serial_users = [(email, date, 'serial') for email, date in serial_users]
+        else:
+            # Fetch new contacts from Users table
+            last_sync_query = "select max(created) from contacts where  type = 'cloud'"
+            last_sync_timestamp = db.analytics_db("GET",last_sync_query, None)
+            user_query = """select email, max("createdAt") as "createdAt" from "Users" where email
+            is not null and "createdAt" > %s group by 1  order by "createdAt" asc limit 2000"""
+            cloud_users = db.cloud_db(user_query,last_sync_timestamp[0])
+            cloud_users = [(email, date, 'cloud') for email, date in cloud_users]
+
+            last_sync_query = "select max(created) from contacts where  type = 'sso'"
+            last_sync_timestamp = db.analytics_db("GET",last_sync_query, None)
+            sso_query = """select email, "createdAt" from "ExternalIdentities" 
+            where email is not null and "createdAt" > %s group by 1,2 order by "createdAt" asc """
+            sso_users = db.cloud_db(sso_query,last_sync_timestamp)
+            sso_users = [(email, date, 'sso') for email, date in sso_users]
+
+            #fetch new users from Serials
+            last_sync_query = "select max(created) from serials"
+            last_sync = db.analytics_db("GET",last_sync_query, None)
+            unix_timestamp = int(last_sync[0][0].timestamp())
+            user_licenses = f"""select email,FROM_UNIXTIME(date) as date from serials 
+            where date > '{unix_timestamp}' limit 300 """
+            serial_users = db.legacy_db(user_licenses,None)
+            serial_users = [(email, date, 'serial') for email, date in serial_users]
+
+            print("SUCCESS: New contacts retrieved from Database")
     except Exception as get_exception:
         print(f"Error in Contacts (GET): {get_exception}")
-    return cloud_users+serial_users
+    return cloud_users+serial_users+sso_users
+
+def duplicate_contacts(contacts):
+    """
+    Remove duplicate contacts based on email addresses.
+
+    Args:
+        contacts (list): List of new contacts.
+
+    Returns:
+        list: Filtered list without duplicate email addresses.
+    """
+    contact_list = ', '.join([f"'{contact[0]}'" for contact in contacts])
+    query = f'select email from contacts where email in ({contact_list})'
+    duplicates = db.analytics_db("GET",query, None)
+    email_list = [email[0] for email in duplicates]
+    filtered_contacts = [contact for contact in contacts if contact[0] not in email_list]
+    return filtered_contacts
+
+def invalid_emails(contacts):
+    """
+    Insert invalid contacts into the database.
+
+    Args:
+        contacts (list): List of invalid contacts.
+        batch (int): Batch number.
+
+    Returns:
+        bool: True if insertion is successful, False otherwise.
+    """
+    try:
+        query = 'insert into invalid_contacts ( email) values (%s)'
+        # Iterate through the list of HubSpot contact IDs and insert them into the database
+        for contact in contacts:
+            query = f"insert into invalid_contacts ( email) values ('{str(contact)}')"
+            db.analytics_db("ADD", query, None)
+    except Exception as get_exception:
+        print(f"Error in insertHubspotID (contacts): {get_exception}")  # Handle any exceptions
+    print("SUCCESS: Invalid Contacts succesfully added to the DB")
+    return True
+
+
 
 
 
@@ -47,11 +136,11 @@ def insert_contact_ids(hubspotids):
         None
     """
     try:
-        query = 'insert into contacts ("hubspotID", email, created) values (%s, %s, %s)'
+        query = 'insert into contacts ("hubspotID", email,type, created) values (%s, %s, %s,%s)'
         # Iterate through the list of HubSpot contact IDs and insert them into the database
         for contact in hubspotids:
                      
-            values = (int(contact[1]), contact[0], contact[2])
+            values = (int(contact[1]), contact[0], contact[3],contact[2])
             db.analytics_db("UPDATE", query, values)
     except Exception as get_exception:
         print(f"Error in insertHubspotID (contacts): {get_exception}")  # Handle any exceptions
@@ -89,45 +178,96 @@ def get_serials():
         # Query to retrieve the last sync timestamp from the database
         last_sync_query = "select max(created) from serials"
         last_sync = db.analytics_db("GET",last_sync_query, None)
-        # Query to retrieve new serials from the database
-        serials_query = f"""
+        if last_sync[0][0] is None:
+            print("Serials table empty, start full Sync")
+            db.analytics_db("ADD",'''
+                    CREATE TABLE if not exists serials (
+                        "hubspotID" bigint PRIMARY KEY,
+                        email character varying,
+                        created timestamp without time zone,
+                        updated timestamp without time zone
+                    )
+                    ''', None)
+            serials_query = """
                         select
                             s.serial,
                             s.email,
-                            s.date as created,
+                            FROM_UNIXTIME(s.date, '%Y-%m-%d') as created,
                             s.id,
                             s.maxUse,
-                            s.update_expirationdate
+                            FROM_UNIXTIME(s.update_expirationdate, '%Y-%m-%d') as update_expirationdate,
+                            IF(
+                                STR_TO_DATE(FROM_UNIXTIME(s.expirationdate), '%Y-%m-%d') > CURDATE() 
+                                AND STR_TO_DATE(FROM_UNIXTIME(s.update_expirationdate), '%Y-%m-%d') > CURDATE(),
+                                'Active',
+                                'Canceled'
+                            ) AS status,
+                            FROM_UNIXTIME(s.date, '%Y-%m-%d %h:%i:%s') as created_long
                             from
                                 serials s
-                            where s.date > UNIX_TIMESTAMP('{last_sync[0][0]}')
                             order by
-                                s.date asc
-                            limit
-                                50
+                                s.date asc limit 400
         """
-        new_serials = db.legacy_db(serials_query,None)
-        serial_list = ', '.join([f"'{serial[1]}'" for serial in new_serials])
-        if serial_list =="":
-            print("DB: No New Serials")
-        else:
-            # Query to retrieve contact hubspot ids
-            hubspotids_query = f'select email,"hubspotID" from contacts where email in ({serial_list})'
-            hubspotids = db.analytics_db("GET",hubspotids_query, None)
-            if hubspotids == []:
-                print("NOTE: Serial contacts not yet added to hubspot")
-            else:
-                # Create a dictionary mapping email addresses to hubspot IDs
-                hubspot_dict = {email: hubspot_id for email, hubspot_id in hubspotids}
+            all_serials = db.legacy_db(serials_query,None)
+            serial_emails = ', '.join([f"'{serial[1]}'" for serial in all_serials])
+            hubspotids = db.analytics_db("GET",f'''
+                    select email,"hubspotID" from contacts where email in ({serial_emails})
+                    ''', None)
+            # Create a dictionary mapping email addresses to hubspot IDs
+            hubspot_dict = {email: hubspot_id for email, hubspot_id in hubspotids}
 
-                # Join the two lists based on email addresses
-                
-                for serial in new_serials:
-                    email = serial[1]  # Assuming email is at index 1 in the new_serials tuples
-                    hubspot_id = hubspot_dict.get(email, None)
-                    if hubspot_id is not None:
-                        joined_list.append((*serial, hubspot_id))  # Assuming you want to add hubspot_id to the new_serials tuples
-    
+            # Join the two lists based on email addresses
+            for serial in all_serials:
+                email = serial[1]  # Assuming email is at index 1 in the new_serials tuples
+                hubspot_id = hubspot_dict.get(email, None)
+                if hubspot_id is not None:
+                    joined_list.append((*serial, hubspot_id))
+        else:
+            # Query to retrieve new serials from the database
+            serials_query = f"""
+                            select
+                                s.serial,
+                            s.email,
+                            FROM_UNIXTIME(s.date, '%Y-%m-%d') as created,
+                            s.id,
+                            s.maxUse,
+                            FROM_UNIXTIME(s.update_expirationdate, '%Y-%m-%d') as update_expirationdate,
+                            IF(
+                                STR_TO_DATE(FROM_UNIXTIME(s.expirationdate), '%Y-%m-%d') > CURDATE() 
+                                AND STR_TO_DATE(FROM_UNIXTIME(s.update_expirationdate), '%Y-%m-%d') > CURDATE(),
+                                'Active',
+                                'Canceled'
+                            ) AS status,
+                            FROM_UNIXTIME(s.date, '%Y-%m-%d %h:%i:%s') as created_long
+                                from
+                                    serials s
+                                 where FROM_UNIXTIME(s.date, '%Y-%m-%d %h:%i:%s') > '{last_sync[0][0]}'
+                                order by
+                                    s.date asc
+                                limit
+                                    50
+            """
+            new_serials = db.legacy_db(serials_query,None)
+            if len(new_serials) ==0 :
+                print("DB: No New Serials")
+            else:
+                serial_list = ', '.join([f"'{serial[1]}'" for serial in new_serials])
+                # Query to retrieve contact hubspot ids
+                hubspotids_query = f"""select email,"hubspotID" from contacts 
+                where email in ({serial_list})"""
+                hubspotids = db.analytics_db("GET",hubspotids_query, None)
+                if hubspotids == []:
+                    print("NOTE: Serial contacts not yet added to hubspot")
+                else:
+                    # Create a dictionary mapping email addresses to hubspot IDs
+                    hubspot_dict = {email: hubspot_id for email, hubspot_id in hubspotids}
+
+                    # Join the two lists based on email addresses
+                    for serial in new_serials:
+                        email = serial[1]  # Assuming email is at index 1 in the new_serials tuples
+                        hubspot_id = hubspot_dict.get(email, None)
+                        if hubspot_id is not None:
+                            joined_list.append((*serial, hubspot_id))
     except Exception as get_exception:
         print(f"Error in Serials (GET): {get_exception}")
     return joined_list
@@ -148,13 +288,19 @@ def get_updated_serials():
         last_sync = db.analytics_db( "GET",query, None)
         # Query to retrieve updated serials from the database
         query = f"""
-        select
-            s.serial,
-            s.email,
-            s.date as created,
-            s.id,
-            s.maxUse,
-            s.update_expirationdate
+                    select  s.serial,
+                    s.email,
+                    FROM_UNIXTIME(s.date, '%Y-%m-%d') as created,
+                    s.id,
+                    s.maxUse,
+                    FROM_UNIXTIME(s.update_expirationdate, '%Y-%m-%d') as update_expirationdate,
+                    IF(
+                        STR_TO_DATE(FROM_UNIXTIME(s.expirationdate), '%Y-%m-%d') > CURDATE() 
+                        AND STR_TO_DATE(FROM_UNIXTIME(s.update_expirationdate), '%Y-%m-%d') > CURDATE(),
+                        'Active',
+                        'Canceled'
+                    ) AS status,
+                    FROM_UNIXTIME(s.date, '%Y-%m-%d %h:%i:%s') as created_long
         from
             serials s
             where last_updated_on > '{last_sync[0][0]}'
@@ -167,7 +313,8 @@ def get_updated_serials():
             print("No New Serials")
         else:
             # Query to retrieve contact hubspot ids
-            hubspotids_query = f'select serial,"hubspotID" from serials where serial in ({serial_list})'
+            hubspotids_query = f"""select serial,"hubspotID" from serials
+            where serial in ({serial_list})"""
             hubspotids = db.analytics_db("GET",hubspotids_query, None)
         # Create a dictionary mapping email addresses to hubspot IDs
             hubspot_dict = {serial: hubspot_id for serial, hubspot_id in hubspotids}
@@ -176,9 +323,7 @@ def get_updated_serials():
                 serialid = serial[0]  # Assuming email is at index 1 in the new_serials tuples
                 hubspot_id = hubspot_dict.get(serialid, None)
                 if hubspot_id is not None:
-                    final.append((*serial, hubspot_id))  # Assuming you want to add hubspot_id to the new_serials tuples
-
-
+                    final.append((*serial, hubspot_id))
     except Exception as get_exception:
         print(f"Error in Serials (UPDATED): {get_exception}")
     return final
@@ -199,12 +344,12 @@ def insert_serial_ids(hubspotids):
         query = 'insert into serials ("hubspotID", serial, created) values (%s, %s, %s)'
         # Iterate over the provided HubSpot IDs
         for serial in hubspotids:
+            print(serial)
             values = (int(serial[0]), serial[1], serial[2])
             db.analytics_db("UPDATE", query, values)
         print("SUCCESS: New serial HubSpot IDs inserted")
     except Exception as get_exception:
         print(f"Error in insertHubspotID (serials): {get_exception}")
-
 
 def delete_serial_ids(serials):
     """
@@ -226,268 +371,3 @@ def delete_serial_ids(serials):
     except Exception as get_exception:
         print(f"Error in Serials (DELETE): {get_exception}")
     return True
-
-def get_memberships():
-    """
-    Retrieves new organization memberships from the database.
-
-    Returns:
-        list: A list of new organization memberships.
-    """
-    print("START: Getting new memberships")
-    joined_list = []
-    final_list = []
-    try:
-        # Query to retrieve the last created membership 
-        query = "select max(created) from memberships"
-        last_sync = db.analytics_db("GET",query, None)
-        # Query to retrieve new memberships from the database
-        query = f"""
-        SELECT 
-            om.id, 
-            om."UserId", 
-            om."OrganizationId", 
-            om.role, 
-            om."isPrimary", 
-            om."isContributor", 
-            om."createdAt", 
-            u.email 
-            FROM "OrganizationMemberships" om
-            LEFT JOIN "Users" u on (u.id = om."UserId")
-            where om."createdAt" > '{last_sync[0][0]}'
-            order by om."createdAt" asc
-            limit 20 
-        """
-        new_memberships = db.cloud_db( query, None)
-        #get workspace hubspot ids
-        workspaces_list = ', '.join([f"'{member[2]}'" for member in new_memberships])
-        if workspaces_list =="":
-            print("DB: No New Memberships")
-        else:
-            # Query to retrieve workspace hubspot ids
-            hubspotids_query = f'select workspace,"hubspotID" from workspaces where workspace in ({workspaces_list})'
-            hubspotids = db.analytics_db("GET",hubspotids_query, None)
-            if hubspotids == []:
-                print("NOTE: workspaces not yet added to hubspot")
-            else:
-                # Create a dictionary mapping workspace ids to hubspot IDs
-                hubspot_dict = {workspace: hubspot_id for workspace, hubspot_id in hubspotids}
-                # Join the two lists based on workspaceids
-                
-                for membership in new_memberships:
-                    hubspot_id = hubspot_dict.get(int(membership[2]), None)
-                    if hubspot_id is not None:
-                        modified_membership = [*membership, hubspot_id]
-                        joined_list.append(modified_membership)
-
-            # Query to retrieve contact hubspot ids
-        email_list = ', '.join([f"'{member[7]}'" for member in new_memberships])
-        if email_list =="":
-            print("DB: No New Memberships")
-        else:
-            # Query to retrieve contact hubspot ids
-            hubspotids_query = f'select email,"hubspotID" from contacts where email in ({email_list})'
-            hubspotids = db.analytics_db("GET",hubspotids_query, None)
-            if hubspotids == []:
-                print("NOTE: Membership contacts not yet added to hubspot")
-            else:
-                # Create a dictionary mapping email addresses to hubspot IDs
-                hubspot_dict = {email: hubspot_id for email, hubspot_id in hubspotids}
-
-                # Join the two lists based on email addresses
-                for member in joined_list:
-                    hubspot_id = hubspot_dict.get(member[7], None)
-                    if hubspot_id is not None:
-                        final_list.append((*member, hubspot_id))  # Assuming you want to add hubspot_id to the new_serials tuples
-    
-    except Exception as get_exception:
-        print(f"Error in Serials (UPDATED): {get_exception}")
-    return final_list
-
-def get_updated_memberships():
-    """
-    Retrieves updated organization memberships from the database.
-
-    Returns:
-        list: A list of updated organization memberships.
-    """
-    print("START: Get updated memberships")
-    final =[]
-    try:
-        # Query to retrieve the last updated memberships
-        query = "select max(created) from memberships"
-        last_sync = db.analytics_db("GET",query, None)
-        # Query to retrieve updated memberships from the database
-        query = f"""
-        SELECT 
-            om.id, 
-            om."UserId", 
-            om."OrganizationId", 
-            om.role, 
-            om."isPrimary", 
-            om."isContributor", 
-            om."createdAt", 
-            u.email 
-            FROM "OrganizationMemberships" om
-            LEFT JOIN "Users" u on (u.id = om."UserId")
-            where om.updated > '{last_sync[0][0]}'
-        """
-        memberships = db.cloud_db( query, None)
-
-        memberships_list = ', '.join([f"'{member[0]}'" for member in memberships])
-        if memberships_list =="":
-            print("No New Memberships")
-        else:
-            # Query to retrieve members hubspot ids
-            hubspotids_query = f'select member,"hubspotID" from memberships where member in ({memberships_list})'
-            hubspotids = db.analytics_db("GET",hubspotids_query, None)
-        # Create a dictionary mapping sketchids  to hubspot IDs
-            hubspot_dict = {member: hubspot_id for member, hubspot_id in hubspotids}
-            # Join the two lists based on sketchids
-            for member in memberships:
-                sketchid = member[0]  # Assuming email is at index 1 in the new_serials tuples
-                hubspot_id = hubspot_dict.get(sketchid, None)
-                if hubspot_id is not None:
-                    final.append((*member, hubspot_id))  
-
-
-    except Exception as get_exception:
-        print(f"Error in Serials (UPDATED): {get_exception}")
-    return final
-
-def insert_membership_ids(hubspotids):
-    """
-    Insert new HubSpot IDs for memberships into the database.
-
-    Args:
-        hubspotids (list): A list of tuples containing HubSpot ID, membershipID, and created date.
-
-    Returns:
-        None
-    """
-    print("START: Inserting new Memberships HubSpot IDs")
-    try:
-        # Define the SQL query for inserting data
-        query = 'insert into memberships ("hubspotID", member, created) values (%s, %s, %s)'
-        # Iterate over the provided HubSpot IDs
-        for membership in hubspotids:
-            values = (int(membership[0]), membership[1], membership[2])
-            db.analytics_db("UPDATE", query, values)
-        print("SUCCESS: New Memberships HubSpot IDs inserted")
-    except Exception as get_exception:
-        print(f"Error in insertHubspotID (Memberships): {get_exception}")
-
-def delete_membership_ids(memberships):
-    """
-    Delete HubSpot IDs associated with memberships from the database.
-
-    Args:
-        memberships (list): A list of memberships to be deleted.
-
-    Returns:
-        True and False
-    """
-    print("START: Deleting memberships on DB")
-    try:
-        # Query to retrieve HubSpot IDs for the provided memberships
-        memberships_list = ', '.join([f"{membership}" for membership in memberships])
-        query = f'delete from memberships where "hubspotID" in ({memberships_list})'
-        db.analytics_db("DELETE", query, None)
-        print("SUCCESS: Memberships IDs deleted from the database")
-    except Exception as get_exception:
-        print(f"Error in Memberships (DELETE): {get_exception}")
-    return True
-
-def get_workspaces():
-    try:
-        print("START: retrieveing workspaces from DB")
-        final_workspaces = []
-        # Query to retrieve the last updated memberships
-        query = "select max(created) from workspaces"
-        last_sync = db.analytics_db("GET",query, None)
-        # Query to retrieve new memberships from the database
-        query = f"""
-        SELECT 
-            id, 
-            name,
-            identifier,
-            "createdAt",
-            "customerId"
-            FROM "Organizations" 
-            where "createdAt" > '{last_sync[0][0]}'
-            order by "createdAt" asc
-            limit 20
-        """
-        workspaces = db.cloud_db( query, None)
-
-        workspaces_list = ', '.join([f"'{workspace[4]}'" for workspace in workspaces])
-        # Retrieve customer ids from paymnts DB
-        query = f"""
-        SELECT 
-            id, 
-            external_id
-            FROM customers 
-            where id in  ({workspaces_list})
-        """
-        workspace_customers = db.payments_db( query, None)
-
-        # Create a dictionary mapping sketchids  to hubspot IDs
-        customers_dict = {id: external_id for id, external_id in workspace_customers}
-        # Join the two lists based on sketchids
-        for workspace in workspaces:
-            paymentsid = workspace[4] 
-            customer_id = customers_dict.get(paymentsid, None)
-            if customer_id is not None:
-                final_workspaces.append((*workspace, customer_id))  
-    except Exception as get_exception:
-        print(f"Error in Serials (UPDATED): {get_exception}")
-    return final_workspaces
-
-def get_workspace_hubspot_id(customer):
-    query = f"""select "hubspotID" from workspaces where customer = '{customer}'"""
-    hubspotid = db.analytics_db("GET",query, None)
-    return hubspotid
-
-
-def insert_workspace_ids(hubspotids):
-    """
-    Insert new HubSpot IDs for Workspaces into the database.
-
-    Args:
-        hubspotids (list): A list of tuples containing HubSpot ID, SketchID, and created date.
-
-    Returns:
-        None
-    """
-    print("START: Inserting new Workspaces HubSpot IDs")
-    try:
-        # Define the SQL query for inserting data
-        query = 'insert into workspaces ("hubspotID", workspace,customer, created) values (%s, %s, %s, %s)'
-        # Iterate over the provided HubSpot IDs
-        for workspace in hubspotids:
-            values = (int(workspace[0]), workspace[1], str(workspace[2]),workspace[3])
-            db.analytics_db("UPDATE", query, values)
-        print("SUCCESS: New Workspace HubSpot IDs inserted")
-    except Exception as get_exception:
-        print(f"Error in insertHubspotID (Workspaces): {get_exception}")
-
-def delete_workspace_ids(workspaces):
-    """
-    Delete HubSpot IDs associated with workspaces from the database.
-
-    Args:
-        workspaces (list): A list of workspaces to be deleted.
-
-    Returns:
-        True and False
-    """
-    print("START: Deleting workspaces on DB")
-    try:
-        # Query to retrieve HubSpot IDs for the provided memberships
-        workspaces_list = ', '.join([f"{workspace}" for workspace in workspaces])
-        query = f'delete from workspaces where workspace in ({workspaces_list})'
-        db.analytics_db("DELETE", query, None)
-        print("SUCCESS: Workspace IDs deleted from the database")
-    except Exception as get_exception:
-        print(f"Error in Workspaces (DELETE): {get_exception}")
- 
