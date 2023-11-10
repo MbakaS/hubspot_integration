@@ -1,9 +1,10 @@
 """ This module contains all API funtions to Hubspot """
 import os
 import re
+import datetime
 from hubspot import HubSpot
 from hubspot.crm.contacts import (BatchInputSimplePublicObjectId,
-                                  BatchInputSimplePublicObjectInputForCreate)
+                                  BatchInputSimplePublicObjectInputForCreate,SimplePublicObjectInput)
 from hubspot.crm.contacts.exceptions import ApiException
 from hubspot.crm.associations.v4 import BatchInputPublicDefaultAssociationMultiPost
 from dotenv import load_dotenv, find_dotenv
@@ -71,7 +72,6 @@ def create_contacts(contacts):
     print("END: Contacts Added...")
     return (hubspot_records,conflict_contacts,invalid_email_list,batch_with_invalid_contacts)
 
-
 def delete_contacts(contacts):
     """
     Delete batch contacts in HubSpot.
@@ -112,8 +112,7 @@ def delete_contacts(contacts):
     print("SUCCESS: Contacts Deleted ")
     return True
 
-
-def create_serials(serials):
+def create_serials(payload):
     """
     Create serials in HubSpot.
     Create assciations between serials and Contacts.
@@ -129,25 +128,26 @@ def create_serials(serials):
     api_client = HubSpot()
     api_client.access_token = token
     hubspot_records = []
-    hubspot_associations = []
     # Batch size
     batch_size = 100
 
     # List to store batches of contacts
     serial_batches = []
     hubspot_associations = []
+    serials = payload[0]
+    contacts_dict = payload[1]
     # Iterate through the contacts and create batches
     for i in range(0, len(serials), batch_size):
         batch = serials[i:i + batch_size]
         serial_batches.append(batch)
     i=0
     for batch in serial_batches:
+        contact_associations = []
         try:
             json = [{"properties": {"serial": serial[0],"email": serial[1],
                                 "status": serial[6],
                                 "created": serial[2]}} for serial in batch ]
             i=i+1
-
             payload = BatchInputSimplePublicObjectInputForCreate(json)
             api_response = api_client.crm.objects.batch_api.create(
                     object_type="License",
@@ -156,34 +156,31 @@ def create_serials(serials):
             for n in range(len(json)):
                 hubspot_id = api_response.results[n].id # Get the 'results' list from the dictionary
                 serial = api_response.results[n].properties.get("serial", "N/A")
-                created = batch[n][7]
+                created = batch[n-1][7]
                 hubspot_records = hubspot_records+[(hubspot_id,serial,created)]
                 # Append the serial information including HubSpot ID and creation date to the list
-                hubspot_associations.append(
-                {"from":{"id":api_response.results[n].id},"to":{"id":batch[n][8]}}
+                contact = contacts_dict.get(api_response.results[n].properties.get("email", "N/A"), None)
 
-            )
+                contact_associations = contact_associations +[{"from":{"id":hubspot_id},"to":{"id":str(contact)}}]
+            
             print(f"Serials -> {(i/len(serial_batches))*100}%")
         except Exception as e:
             error = str(e)
             print(error)
             print(f"{error[1]}{error[2]}{error[3]}")
             continue
-    # create associations for the newly added serials
-    associations = BatchInputPublicDefaultAssociationMultiPost(inputs=hubspot_associations)
-    try:
-        api_response = api_client.crm.associations.v4.batch_api.create_default(
-            from_object_type="License", to_object_type="Contact",
-            batch_input_public_default_association_multi_post=associations)
-        if api_response.status == "COMPLETE":
-            print("SUCCESS: All serials associated with contacts")
-        else:
-            print(api_response.status)
-    except ApiException as error:
-        print(f"Exception when calling batch_api->Associate: {error}/n")
+        # create associations for the newly added serials
+        associations = BatchInputPublicDefaultAssociationMultiPost(inputs=contact_associations)
+        try:
+            api_response = api_client.crm.associations.v4.batch_api.create_default(
+                from_object_type="License", to_object_type="Contact",
+                batch_input_public_default_association_multi_post=associations)
+            if api_response.status != "COMPLETE":
+                print("Error: Assoiciating contacts")
+        except ApiException as error:
+            print(f"Exception when calling batch_api->Associate: {error}/n")
     print("SUCCESS: Serials added to HubSpot")
     return hubspot_records
-
 
 def update_serials(serials):
     """
@@ -229,7 +226,6 @@ def update_serials(serials):
     print("SUCCESS: Serials updated on Hubspot")
     return True
 
-
 def delete_serials(serials):
     """
     Delete serials in HubSpot.
@@ -258,7 +254,7 @@ def delete_serials(serials):
     i=0
     for batch in serial_batches:
         try:
-            json = [ {"id": serial} for serial in batch]
+            json = [ {"id": serial[0]} for serial in batch]
             payload = BatchInputSimplePublicObjectId(inputs=json)
         # Delete a serial object in HubSpot
             api_client.crm.objects.batch_api.archive(
@@ -270,4 +266,364 @@ def delete_serials(serials):
             print(error)
             continue  
     print("SUCCESS: Batch Serials deleted from the database")
+    return True
+
+def create_workspaces(workspaces):
+    """
+    Create workspaces in HubSpot CRM.
+
+    Args:
+        workspaces (list): List of workspace data.
+
+    Returns:
+        list: List of tuples containing HubSpot ID, SketchID, workspace name, and email.
+    """
+    print("START: Adding Workspaces to HubSpot...")
+    api_client = HubSpot(access_token=token)
+    batch_size = 100
+    workspace_batches = []
+    error_batch = []
+    hubspot_records = []
+
+    for i in range(0, len(workspaces), batch_size):
+        batch = workspaces[i:i + batch_size]
+        workspace_batches.append(batch)
+
+    i = 0
+    for batch in workspace_batches:
+        i += 1
+        try:
+            # Prepare JSON payload for workspace creation
+            json = [{
+                "properties": {
+                    "sketchid": int(workspace[0]),
+                    "name": workspace[1],
+                    "email": workspace[4],
+                    "domain": workspace[4],
+                    "link_to_cloud_admin": f"https://cloudadmin.sketchsrv.com/team/{workspace[2]}",
+                    "link_to_stripe": f"https://dashboard.stripe.com/customers/{workspace[3]}",
+                    "status": workspace[8],
+                    "renewal_date": datetime.datetime.utcfromtimestamp(int(
+                                                            workspace[14])).strftime('%Y-%m-%d'),
+                    "paid_seats": int(workspace[11]),
+                    "plan": workspace[10],
+                    "created": datetime.datetime.utcfromtimestamp(int(
+                                                            workspace[6])).strftime('%Y-%m-%d')
+                }
+            } for workspace in batch]
+            payload = BatchInputSimplePublicObjectInputForCreate(json)
+            api_response = api_client.crm.objects.batch_api.create(
+                object_type="Workspaces",
+                batch_input_simple_public_object_input_for_create=payload
+            )
+
+            # Extract HubSpot IDs and workspace details from the response
+            for n in range(len(json)):
+                hubspot_id = api_response.results[n].id
+                workspace = api_response.results[n].properties.get("sketchid", "N/A")
+                email = api_response.results[n].properties.get("email", "N/A")
+                hubspot_records.append((hubspot_id, workspace, str(batch[n][15]), email))
+
+        except Exception as e:
+            error = str(e)
+            print(f"Exception when creating Workspace batch {i}")
+            print(error)
+            error_batch.append(batch)
+            continue
+
+    print("Success: Workspaces Added...")
+    return hubspot_records
+
+def workspaces_associate(workspaces):
+    """
+    Associate workspaces with contacts in HubSpot CRM.
+
+    Args:
+        workspaces (list): List of workspace data.
+
+    Returns:
+        bool: True if associations are successful, False otherwise.
+    """
+    api_client = HubSpot(access_token=token)
+    batch_size = 100
+    workspace_batches = []
+
+    for i in range(0, len(workspaces), batch_size):
+        batch = workspaces[i:i + batch_size]
+        workspace_batches.append(batch)
+
+    for batch in workspace_batches:
+        try:
+            # Prepare HubSpot associations for workspaces and contacts
+            hubspot_associations = [{
+                "from": {"id": workspace[0]},
+                "to": {"id": workspace[4]}
+            } for workspace in workspaces]
+
+            # Create associations for the newly added workspaces
+            associations = BatchInputPublicDefaultAssociationMultiPost(inputs=hubspot_associations)
+            api_response = api_client.crm.associations.v4.batch_api.create_default(
+                from_object_type="Workspaces",
+                to_object_type="Contact",
+                batch_input_public_default_association_multi_post=associations
+            )
+
+            if api_response.status != "COMPLETE":
+                print("Error: creating workspace Associations")
+            else:
+                print(api_response.status)
+
+        except ApiException as error:
+            print(f"Exception when calling batch_api->Associate: {error}\n")
+            print(f"Workspaces -> {(i / len(workspace_batches)) * 100}%")
+
+    return True
+
+def update_workspace(payload, hubspotid):
+    """
+    Update workspace details in HubSpot CRM.
+
+    Args:
+        payload (dict): A dictionary containing updated workspace details.
+        hubspotid (int): HubSpot object ID of the workspace to be updated.
+
+    Returns:
+        None
+    """
+    api_client = HubSpot()
+    api_client.access_token = token
+    print("START: Updating workspace details")
+
+    # Create a SimplePublicObjectInput instance
+    object_input = SimplePublicObjectInput(properties=payload)
+
+    try:
+        # Update the workspace object in HubSpot
+        api_client.crm.objects.basic_api.update(
+            object_type="Workspaces",
+            object_id=hubspotid,
+            simple_public_object_input=object_input
+        )
+
+    except ApiException as error:
+        print(f"Exception when updating Workspaces: {error}\n")
+
+def delete_workspaces(payload):
+    """
+    Delete workspaces in HubSpot CRM.
+
+    Args:
+        payload (list): A list of workspace HubSpot IDs to be deleted.
+
+    Returns:
+        bool: True if the delete operation was successful, False otherwise.
+    """
+    print("START: Deleting workspaces on HubSpot")
+
+    api_client = HubSpot()
+    api_client.access_token = token
+    workspaces = payload[0]
+    batch_size = 100
+    workspace_batches = []
+
+    for i in range(0, len(workspaces), batch_size):
+        batch = workspaces[i:i + batch_size]
+        workspace_batches.append(batch)
+
+    i = 0
+    for batch in workspace_batches:
+        try:
+            # Prepare JSON payload for workspace deletion
+            json = [{"id": workspace[0]} for workspace in batch]
+            payload = BatchInputSimplePublicObjectId(inputs=json)
+
+            # Delete workspace objects in HubSpot
+            api_client.crm.objects.batch_api.archive(
+                batch_input_simple_public_object_id=payload,
+                object_type="Workspaces"
+            )
+        except Exception as e:
+            error = str(e)
+            print(error)
+            continue
+
+    print("SUCCESS: Deleted workspaces on HubSpot")
+    return True
+
+def create_memberships(payload):
+    """
+    Create new memberships in HubSpot CRM.
+
+    Args:
+        payload (tuple): A tuple containing a list of membership 
+        data and dictionaries for contacts and workspaces mapping.
+
+    Returns:
+        list: A list of tuples containing HubSpot object IDs, corresponding sketch IDs, 
+        and creation dates.
+    """
+    print("START: Adding new memberships to HubSpot")
+    api_client = HubSpot(access_token=token)
+    api_client.access_token = token
+    batch_size = 100
+    membership_batches = []
+    error_batch = []
+    hubspot_records = []
+    memberships = payload[0]
+    contacts_dict = payload[1]
+    workspaces_dict = payload[2]
+
+    for i in range(0, len(memberships), batch_size):
+        batch = memberships[i:i + batch_size]
+        membership_batches.append(batch)
+
+    i = 0
+    for batch in membership_batches:
+        workspaces_associations = []
+        contacts_associations = []
+        try:
+            json = [{"properties": {
+                        "name": f"{membership[7]}_{membership[2]}",
+                        "sketchid": membership[0],
+                        "email": membership[7],
+                        "created": membership[6].strftime('%Y-%m-%d'),
+                        "role": membership[3],
+                        "editor": membership[5],
+                    }} for membership in batch]
+            payload = BatchInputSimplePublicObjectInputForCreate(json)
+            api_response = api_client.crm.objects.batch_api.create(
+                object_type="Memberships",
+                batch_input_simple_public_object_input_for_create=payload
+            )
+
+            i += 1
+            print(f"Memberships -> {(i / len(membership_batches)) * 100}%")
+
+            for n in range(len(json)):
+                hubspot_id = api_response.results[n].id
+                membership_id = api_response.results[n].properties.get("sketchid", "N/A")
+                hubspot_records.append((hubspot_id, membership_id, str(batch[n - 1][6])))
+                contact = contacts_dict.get(api_response.results[n].properties.get(
+                                                                        "email", "N/A"), None)
+                name = (api_response.results[n].properties.get("name", "N/A")).split('_')
+                organization = workspaces_dict.get(int(name[-1]))
+
+                workspaces_associations.append({"from": {"id": hubspot_id}, 
+                                                "to": {"id": str(organization)}})
+                contacts_associations.append({"from": {"id": hubspot_id}, 
+                                              "to": {"id": str(contact)}})
+
+            # Create associations for the newly added memberships
+            associations = BatchInputPublicDefaultAssociationMultiPost(inputs=contacts_associations)
+            api_client.crm.associations.v4.batch_api.create_default(
+                from_object_type="Memberships", to_object_type="Contact",
+                batch_input_public_default_association_multi_post=associations
+            )
+
+            associations = BatchInputPublicDefaultAssociationMultiPost(
+                inputs=workspaces_associations)
+            api_client.crm.associations.v4.batch_api.create_default(
+                from_object_type="Memberships", to_object_type="Workspaces",
+                batch_input_public_default_association_multi_post=associations
+            )
+
+        except Exception as e:
+            error = str(e)
+            print(f"Exception when creating Membership batch {i}")
+            print(error)
+            print(f"{error[1]}{error[2]}{error[3]}")
+            error_batch.append(batch)
+            continue
+
+    print("SUCCESS: Memberships added to HubSpot")
+    return hubspot_records
+
+def update_memberships(payload):
+    """
+    Update memberships in HubSpot CRM.
+
+    Args:
+        payload (list): A list of membership information where each item is a tuple
+        containing membership details like (sketchid, email, created_timestamp).
+
+    Returns:
+        bool: True if the update operation was successful, False otherwise.
+    """
+    print("START: Updating memberships on Hubspot")
+    api_client = HubSpot(access_token=token)
+    api_client.access_token = token
+    batch_size = 100
+    memberships_batches = []
+
+    for i in range(0, len(payload), batch_size):
+        batch = payload[i:i + batch_size]
+        memberships_batches.append(batch)
+
+    i = 0
+    for batch in memberships_batches:
+        try:
+            json = [{"id":membership[8],"properties": {
+                        "name": f"{membership[7]}_{membership[2]}",
+                        "sketchid": membership[0],
+                        "email": membership[7],
+                        "created": membership[6].strftime('%Y-%m-%d'),
+                        "role": membership[3],
+                        "editor": membership[5],
+                    }} for membership in batch]
+            payload = BatchInputSimplePublicObjectId(inputs=json)
+            api_client.crm.objects.batch_api.update(
+                 object_type="Memberships",
+                 batch_input_simple_public_object_batch_input=payload
+            )
+            i += 1
+            print(f"Memberships -> {(i / len(memberships_batches)) * 100}%")
+        except Exception as e:
+            error = str(e)
+            print(error)
+            print(f"{error[1]}{error[2]}{error[3]}")
+            continue
+
+    print("SUCCESS: Memberships updated on Hubspot")
+    return True
+
+def delete_memberships(payload):
+    """
+    Delete memberships in HubSpot CRM.
+
+    Args:
+        payload (list): A list of membership HubSpot IDs to be deleted.
+
+    Returns:
+        bool: True if the delete operation was successful, False otherwise.
+    """
+    print("START: Deleting memberships on Hubspot")
+
+    api_client = HubSpot()
+    api_client.access_token = token
+    workspaces = payload[0]
+    # Batch size
+    batch_size = 100
+
+    # List to store batches of serials
+    workspace_batches = []
+
+    # Iterate through the serials and create batches
+    for i in range(0, len(workspaces), batch_size):
+        batch = workspaces[i:i + batch_size]
+        workspace_batches.append(batch)
+    i=0
+    for batch in workspace_batches:
+        try:
+            json = [ {"id": workspace[0]} for workspace in batch]
+            payload = BatchInputSimplePublicObjectId(inputs=json)
+        # Delete a serial object in HubSpot
+            api_client.crm.objects.batch_api.archive(
+                batch_input_simple_public_object_id=payload,
+                object_type="Workspaces"
+            )
+        except Exception as e:
+            error = str(e)
+            print(error)
+            continue
+    print("SUCCESS: Deleted workspaces on Hubspot")
     return True
