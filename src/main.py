@@ -67,7 +67,7 @@ def add_serials_workflow():
     """
     try:
         new_serials = db.get_serials()
-        if len(new_serials) == 0:
+        if len(new_serials[0]) == 0:
             print("No new Serials found")
         else:
             serial_hubspot_ids = hubspot.create_serials(new_serials)
@@ -128,21 +128,8 @@ def create_all_workspaces():
         None
     """
     try:
-        all_subscriptions = stripe.get_all_subscriptions()
-        all_workspaces = db.get_workspaces(all_subscriptions[0], all_subscriptions[1])
-
-        # Convert the DataFrame to a NumPy array of records
-        workspaces_records = all_workspaces.to_records(index=False)
-
-        # Convert the NumPy array of records to a list of tuples
-        final_workspaces_list = list(workspaces_records)
-
-        # Print the final_workspaces_list
-        workspaces_hubspotids = hubspot.create_workspaces(final_workspaces_list)
-
-        workspaces_complete = db.add_contact_hubspot_id(workspaces_hubspotids)
-        db.insert_workspace_ids(workspaces_hubspotids)
-        hubspot.workspaces_associate(workspaces_complete)
+        stripe.get_all_subscriptions()
+        
     except Exception as e:
         print(f"An error occurred: {e}")
 
@@ -150,7 +137,8 @@ def add_memberships():
     """
     Workflow function to add memberships to HubSpot.
 
-    Retrieves new memberships from the database, creates memberships in HubSpot, and stores corresponding HubSpot IDs in the database.
+    Retrieves new memberships from the database, creates memberships in HubSpot, 
+    and stores corresponding HubSpot IDs in the database.
 
     Returns:
         None
@@ -160,8 +148,7 @@ def add_memberships():
         if len(new_memberships) == 0:
             print("No new Memberships found")
         else:
-            membership_hubspotids = hubspot.create_memberships(new_memberships)
-            db.insert_membership_ids(membership_hubspotids)
+            hubspot.create_memberships(new_memberships)
     except Exception as e:
         print(f"An error occurred: {e}")
 
@@ -170,7 +157,8 @@ def delete_workpaces_and_memberships():
     Workflow function to delete workspaces and memberships from HubSpot.
 
     Retrieves workspaces and memberships HubSpot IDs to be deleted from the database,
-    deletes corresponding workspaces and memberships from HubSpot, and updates the database to reflect the deletion.
+    deletes corresponding workspaces and memberships from HubSpot, 
+    and updates the database to reflect the deletion.
 
     Returns:
         None
@@ -215,11 +203,10 @@ def main():
         - create_all_workspaces
     """
     delete_workpaces_and_memberships()
-    delete_serials_workflow()
+    #delete_serials_workflow()
     add_contacts_workflow()
     update_serials_workflow()
     add_serials_workflow()
-
     if len(sys.argv) > 1:
         command = sys.argv[1]
         if command == "create_all_workspaces":
@@ -232,6 +219,5 @@ def main():
     add_workspaces_workflow()
     update_memberships()
     add_memberships()
-
 if __name__ == "__main__":
     main()

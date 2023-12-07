@@ -3,14 +3,20 @@ import os
 import time
 import stripe
 from dotenv import load_dotenv, find_dotenv
+from ratelimit import limits, sleep_and_retry
+import database as db # Import your database functions module
+import hubspot_api as hubspot # Import your HubSpot functions module
 
 # Load environment variable from a .env file
 load_dotenv(find_dotenv())
-api_key = os.getenv('STRIPE_TEST')
+api_key = os.getenv('API_KEY')
 
 stripe.api_key = api_key
 stripe.max_network_retries = 2
-REQUEST_DELAY = 0.6  # Specify the delay between API requests in seconds 
+REQUEST_DELAY = 0.2  # Specify the delay between API requests in seconds 
+# Define the rate limit: 50 requests per minute (adjust this based on Stripe's rate limits)
+@sleep_and_retry
+@limits(calls=30, period=60)  # 50 requests per 60 seconds
 
 def get_all_subscriptions():
     """
@@ -22,27 +28,48 @@ def get_all_subscriptions():
             interval, quantity, status, trial_start, trial_end, current_period_end, email)
     """
     print("START: Get all active and trialing subscriptions from Stripe API")
-    active_subscriptions = []
-    customer_list = []
+    
     page_size = 100  # Specify the desired page size
-
     # Retrieve all subscriptions from the Stripe API
-    subscriptions = stripe.Subscription.auto_paging_iter(limit=page_size)
-
-    # Filter active subscriptions
-    for subscription in subscriptions:
-        if subscription.status in ('active', 'trialing', 'unpaid', 'overdue'):
-            customer = stripe.Customer.retrieve(subscription.customer)
-            subscription_tuple = (subscription.id, subscription.created, subscription.customer,
-                subscription.ended_at,subscription.plan.id, subscription.plan.interval,
-                subscription.quantity,subscription.status,subscription.trial_start, 
-                subscription.trial_end,subscription.current_period_end, customer.email)
-            active_subscriptions.append(subscription_tuple)
-            customer_list.append(subscription.customer)
-        time.sleep(REQUEST_DELAY)
+    i = 0
+    n = 0
+    active_subscriptions = []
+    customer_list = []  
+    for subscription in stripe.Subscription.auto_paging_iter(status='trialing', limit=page_size):
+        i=i+1
+        customer = stripe.Customer.retrieve(subscription.customer)
+        subscription_tuple = (subscription.id, subscription.created, subscription.customer,
+            subscription.ended_at,subscription.plan.id, subscription.plan.interval,
+            subscription.quantity,subscription.status,subscription.trial_start, 
+            subscription.trial_end,subscription.current_period_end, customer.email)
+        active_subscriptions.append(subscription_tuple)
+        customer_list.append(subscription.customer)
+        if i == 1000:
+            n=n+1
+            print(f"Batch: {n}")
+            work([active_subscriptions, customer_list])
+            i=0
+            active_subscriptions = []
+            customer_list = [] 
     print("Success: All active and trialing subscriptions retrieved")
-    return [active_subscriptions, customer_list]
+    return True
 
+def work(all_subscriptions):
+    all_workspaces = db.get_workspaces(all_subscriptions[0], all_subscriptions[1])
+
+    # Convert the DataFrame to a NumPy array of records
+    workspaces_records = all_workspaces.to_records(index=False)
+
+    # Convert the NumPy array of records to a list of tuples
+    final_workspaces_list = list(workspaces_records)
+
+    # Print the final_workspaces_list
+    workspaces_hubspotids = hubspot.create_workspaces(final_workspaces_list)
+
+    workspaces_complete = db.add_contact_hubspot_id(workspaces_hubspotids)
+    db.insert_workspace_ids(workspaces_hubspotids)
+    hubspot.workspaces_associate(workspaces_complete)
+    return True
 def get_subscriptions(workspaces):
     """
     Retrieve subscriptions from Stripe for the given workspaces.
@@ -68,25 +95,32 @@ def get_subscriptions(workspaces):
                 subscription = subscription["data"][0]
                 customer_data = [customer.id, customer.email]
                 id = subscription["id"],
-                created = workspace[3],
+                created = subscription["created"],
                 customer = subscription["customer"],
                 ended_at = subscription["ended_at"],
-                plan = subscription["plan"]["id"],
+                plan = subscription["plan"]["nickname"],
                 interval = subscription["plan"]["interval"],
                 quantity = subscription["quantity"],
                 status = subscription["status"],
                 trial_start = subscription["trial_start"],
                 trial_end = subscription["trial_end"],
                 current_period_end = subscription["current_period_end"]
-
-                formatted_date = created[0].strftime('%Y%m%d')
-                # Convert the formatted date string to an integer
-                date_integer = int(formatted_date)
-
+                priority = False
+                if plan in ('Legacy Business Plan / Yearly ($231 per Editor)',
+                            'Legacy Business Plan / Yearly ($207.90 per Editor)',
+                            'Business Plan / Yearly (2.38% discount)',
+                            'Business Plan / Yearly (10% discount)',
+                            'Business Plan / Yearly',
+                            'Business Example Price',
+                            'Alibaba Pricing'):
+                    priority = 'Yes'
+                else:
+                    priority = 'No'
+                
                 data.append([workspace[0], workspace[1], workspace[2], customer_data[0],
-                              customer_data[1], id[0], date_integer, plan[0], status[0], 
+                              customer_data[1], id[0], created[0], plan[0], status[0], 
                               ended_at[0], interval[0], quantity[0], trial_start[0], trial_end[0], 
-                              current_period_end, workspace[3]])
+                              current_period_end, workspace[3],priority])
             else:
                 print("NULL")
         except Exception as e:

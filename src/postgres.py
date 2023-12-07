@@ -48,8 +48,6 @@ def analytics_db(action, query, values):
 
             if action == 'GET':
                 response = cur.fetchall()
-
-            
             cur.close()
         except (Exception, psycopg2.DatabaseError) as error:
             print(f"Error in analytics DB connection: {error}")

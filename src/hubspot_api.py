@@ -4,10 +4,11 @@ import re
 import datetime
 from hubspot import HubSpot
 from hubspot.crm.contacts import (BatchInputSimplePublicObjectId,
-                                  BatchInputSimplePublicObjectInputForCreate,SimplePublicObjectInput)
+                    BatchInputSimplePublicObjectInputForCreate,SimplePublicObjectInput)
 from hubspot.crm.contacts.exceptions import ApiException
 from hubspot.crm.associations.v4 import BatchInputPublicDefaultAssociationMultiPost
 from dotenv import load_dotenv, find_dotenv
+import database as db # Import your database functions module
 
 # Load environment variables from a .env file
 load_dotenv(find_dotenv())
@@ -28,7 +29,6 @@ def create_contacts(contacts):
     """
     print("START: adding contacts to hubspot...")
     api_client = HubSpot(access_token=token)
-    hubspot_records = []
     invalid_email_list = []
     conflict_contacts = []
     batch_with_invalid_contacts = []
@@ -44,17 +44,20 @@ def create_contacts(contacts):
     i=0
     for batch in contact_batches:
         i=i+1
+        hubspot_records = []
         try:
             json = [{"properties": {"email": email}} for email, *_ in batch ]
             payload = BatchInputSimplePublicObjectId(json)
             api_response = api_client.crm.contacts.batch_api.create(
             batch_input_simple_public_object_input_for_create=payload)
             # Iterate over the results list and create (id, email) tuples for each item
-            for n in range(len(json)):
+            length = len(api_response.results)
+            for n in range(length):
                 hubspot_id = api_response.results[n].id # Get the 'results' list from the dictionary
                 email = api_response.results[n].properties.get("email", "N/A")
                 created = batch[n][1]
                 hubspot_records = hubspot_records+[(email,hubspot_id,created,batch[n][2])]
+            db.insert_contact_ids(hubspot_records)
             print(f"Contacts -> {(i/len(contact_batches))*100}%")
         except Exception as e:
             error = str(e)
@@ -70,7 +73,7 @@ def create_contacts(contacts):
             print(f"Exception when creating contacts Batch {i}, ERROR: {status_code},")
             continue
     print("END: Contacts Added...")
-    return (hubspot_records,conflict_contacts,invalid_email_list,batch_with_invalid_contacts)
+    return ([],conflict_contacts,invalid_email_list,batch_with_invalid_contacts)
 
 def delete_contacts(contacts):
     """
@@ -127,13 +130,11 @@ def create_serials(payload):
     print("START: Adding new serials to HubSpot")
     api_client = HubSpot()
     api_client.access_token = token
-    hubspot_records = []
     # Batch size
     batch_size = 100
 
     # List to store batches of contacts
     serial_batches = []
-    hubspot_associations = []
     serials = payload[0]
     contacts_dict = payload[1]
     # Iterate through the contacts and create batches
@@ -143,6 +144,7 @@ def create_serials(payload):
     i=0
     for batch in serial_batches:
         contact_associations = []
+        hubspot_records = []
         try:
             json = [{"properties": {"serial": serial[0],"email": serial[1],
                                 "status": serial[6],
@@ -159,16 +161,19 @@ def create_serials(payload):
                 created = batch[n-1][7]
                 hubspot_records = hubspot_records+[(hubspot_id,serial,created)]
                 # Append the serial information including HubSpot ID and creation date to the list
-                contact = contacts_dict.get(api_response.results[n].properties.get("email", "N/A"), None)
-
-                contact_associations = contact_associations +[{"from":{"id":hubspot_id},"to":{"id":str(contact)}}]
-            
+                contact = contacts_dict.get(api_response.results[n].properties.get("email", "N/A")
+                                            , None)
+                contact_associations = contact_associations +[
+                    {"from":{"id":hubspot_id},"to":{"id":str(contact)}}]
             print(f"Serials -> {(i/len(serial_batches))*100}%")
         except Exception as e:
             error = str(e)
             print(error)
             print(f"{error[1]}{error[2]}{error[3]}")
             continue
+
+        db.insert_serial_ids(hubspot_records)
+
         # create associations for the newly added serials
         associations = BatchInputPublicDefaultAssociationMultiPost(inputs=contact_associations)
         try:
@@ -306,7 +311,7 @@ def create_workspaces(workspaces):
                     "renewal_date": datetime.datetime.utcfromtimestamp(int(
                                                             workspace[14])).strftime('%Y-%m-%d'),
                     "paid_seats": int(workspace[11]),
-                    "plan": workspace[10],
+                    "plan": workspace[7],
                     "created": datetime.datetime.utcfromtimestamp(int(
                                                             workspace[6])).strftime('%Y-%m-%d')
                 }
@@ -318,11 +323,15 @@ def create_workspaces(workspaces):
             )
 
             # Extract HubSpot IDs and workspace details from the response
-            for n in range(len(json)):
+            length = len(api_response.results)
+            for n in range(length):
                 hubspot_id = api_response.results[n].id
                 workspace = api_response.results[n].properties.get("sketchid", "N/A")
                 email = api_response.results[n].properties.get("email", "N/A")
-                hubspot_records.append((hubspot_id, workspace, str(batch[n][15]), email))
+                customer_id = batch[n][3]
+                hubspot_records.append((hubspot_id, workspace, str(batch[n][15]),
+                                        email,customer_id))
+            print(f"Workspaces -> {(i/len(workspace_batches))*100}%")
 
         except Exception as e:
             error = str(e)
@@ -345,7 +354,7 @@ def workspaces_associate(workspaces):
         bool: True if associations are successful, False otherwise.
     """
     api_client = HubSpot(access_token=token)
-    batch_size = 100
+    batch_size = 1000
     workspace_batches = []
 
     for i in range(0, len(workspaces), batch_size):
@@ -357,9 +366,8 @@ def workspaces_associate(workspaces):
             # Prepare HubSpot associations for workspaces and contacts
             hubspot_associations = [{
                 "from": {"id": workspace[0]},
-                "to": {"id": workspace[4]}
-            } for workspace in workspaces]
-
+                "to": {"id": workspace[5]}
+            } for workspace in batch]
             # Create associations for the newly added workspaces
             associations = BatchInputPublicDefaultAssociationMultiPost(inputs=hubspot_associations)
             api_response = api_client.crm.associations.v4.batch_api.create_default(
@@ -392,8 +400,6 @@ def update_workspace(payload, hubspotid):
     """
     api_client = HubSpot()
     api_client.access_token = token
-    print("START: Updating workspace details")
-
     # Create a SimplePublicObjectInput instance
     object_input = SimplePublicObjectInput(properties=payload)
 
@@ -468,17 +474,16 @@ def create_memberships(payload):
     batch_size = 100
     membership_batches = []
     error_batch = []
-    hubspot_records = []
     memberships = payload[0]
     contacts_dict = payload[1]
     workspaces_dict = payload[2]
-
     for i in range(0, len(memberships), batch_size):
         batch = memberships[i:i + batch_size]
         membership_batches.append(batch)
 
     i = 0
     for batch in membership_batches:
+        hubspot_records = []
         workspaces_associations = []
         contacts_associations = []
         try:
@@ -497,14 +502,13 @@ def create_memberships(payload):
             )
 
             i += 1
-            print(f"Memberships -> {(i / len(membership_batches)) * 100}%")
-
-            for n in range(len(json)):
+            response_length = api_response.results
+            for n in range(len(response_length)):
                 hubspot_id = api_response.results[n].id
                 membership_id = api_response.results[n].properties.get("sketchid", "N/A")
                 hubspot_records.append((hubspot_id, membership_id, str(batch[n - 1][6])))
-                contact = contacts_dict.get(api_response.results[n].properties.get(
-                                                                        "email", "N/A"), None)
+                email = api_response.results[n].properties.get("email", "N/A")
+                contact = contacts_dict.get(email, None)   
                 name = (api_response.results[n].properties.get("name", "N/A")).split('_')
                 organization = workspaces_dict.get(int(name[-1]))
 
@@ -527,6 +531,9 @@ def create_memberships(payload):
                 batch_input_public_default_association_multi_post=associations
             )
 
+            db.insert_membership_ids(hubspot_records)
+            print(f"Memberships -> {(i / len(membership_batches)) * 100}%")
+
         except Exception as e:
             error = str(e)
             print(f"Exception when creating Membership batch {i}")
@@ -536,7 +543,7 @@ def create_memberships(payload):
             continue
 
     print("SUCCESS: Memberships added to HubSpot")
-    return hubspot_records
+    return True
 
 def update_memberships(payload):
     """
