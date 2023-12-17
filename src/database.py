@@ -1,4 +1,5 @@
 """ Contains all hubspot operations"""
+import re
 import datetime
 import pandas as pd
 import postgres as db
@@ -40,12 +41,10 @@ def get_contacts():
                         email character varying
                     )
                     ''', None)
-            #user_query = """select email, "createdAt" from "Users" where email is not null
-            #group by 1,2 order by "createdAt" limit 500000"""
             user_query = """select email, date from emails where email is not null
             group by 1,2 order by date limit 500000"""
             cloud_users = db.analytics_db("GET",user_query,None)
-            cloud_list = [(email, date, 'cloud') for email, date in cloud_users]
+            cloud_list = [(re.sub(r"'", r"''", email), date, 'cloud') for email, date in cloud_users]
 
             sso_query = """select email, "createdAt" from "ExternalIdentities"
             where email is not null group by 1,2 order by "createdAt" asc """
@@ -67,7 +66,7 @@ def get_contacts():
             is not null and "createdAt" > '{last_sync_timestamp[0][0]}' and email NOT ILIKE '%''%'
               ESCAPE '#' group by 1  order by "createdAt" asc """
             cloud_users = db.cloud_db(user_query,None)
-            cloud_list = [(email, date, 'cloud') for email, date in cloud_users]
+            cloud_list = [(email, date, 'cloud') for email,date in cloud_users]
             print(f"Cloud Users: {len(cloud_list)}")
             last_sync_query = "select max(created) from contacts where  type = 'sso'"
             last_sync_timestamp = db.analytics_db("GET",last_sync_query, None)
@@ -104,7 +103,7 @@ def get_contacts():
             print("SUCCESS: New contacts retrieved from Database")
     except Exception as get_exception:
         print(f"Error in Contacts (GET): {get_exception}")
-    return cloud_list+serial_list+sso_list
+    return cloud_list+sso_list+serial_list
 
 def duplicate_contacts(contacts):
     """
@@ -220,8 +219,8 @@ def get_serials():
                             IF(
                                 STR_TO_DATE(FROM_UNIXTIME(s.expirationdate), '%Y-%m-%d') > CURDATE() 
                                 AND STR_TO_DATE(FROM_UNIXTIME(s.update_expirationdate), '%Y-%m-%d') > CURDATE(),
-                                'Active',
-                                'Canceled'
+                                'true',
+                                'false'
                             ) AS status,
                             FROM_UNIXTIME(s.date, '%Y-%m-%d %h:%i:%s') as created_long
                             from
@@ -253,8 +252,8 @@ def get_serials():
                             IF(
                                 STR_TO_DATE(FROM_UNIXTIME(s.expirationdate), '%Y-%m-%d') > CURDATE() 
                                 AND STR_TO_DATE(FROM_UNIXTIME(s.update_expirationdate), '%Y-%m-%d') > CURDATE(),
-                                'Active',
-                                'Canceled'
+                                'true',
+                                'false'
                             ) AS status,
                             FROM_UNIXTIME(s.date, '%Y-%m-%d %h:%i:%s') as created_long
                                 from
@@ -306,8 +305,8 @@ def get_updated_serials():
                     IF(
                         STR_TO_DATE(FROM_UNIXTIME(s.expirationdate), '%Y-%m-%d') > CURDATE() 
                         AND STR_TO_DATE(FROM_UNIXTIME(s.update_expirationdate), '%Y-%m-%d') > CURDATE(),
-                        'Active',
-                        'Canceled'
+                        'true',
+                        'false'
                     ) AS status,
                     FROM_UNIXTIME(s.date, '%Y-%m-%d %h:%i:%s') as created_long
         from
@@ -377,11 +376,9 @@ def delete_serial_ids():
         query = f"""
                     select  s.serial  from
             serials s
-            where 'deletedAt' > '{last_sync[0][0]} limit 20'
-
+            where "deletedAt" > '{last_sync[0][0]}'
         """
         deleted_serials = db.legacy_db( query, None)
-        print()
         if len(deleted_serials)>0:
             # Query to retrieve HubSpot IDs for the provided serials
             serial_list = ', '.join([f"'{serial[0]}'" for serial in deleted_serials])
@@ -417,7 +414,7 @@ def get_workspaces(subscriptions=None,customers_list=None):
             subscriptions_df = pd.DataFrame(subscriptions, columns=[
                 'subscription_id','created', 'customer','ended_at',
                 'plan_id','plan','quantity','status',
-                'trial_start','trial_end','current_period_end','email'])
+                'trial_start','trial_end','current_period_end','email','priority','payment_menthod','auto_renew'])
             # Create a comma-separated string of workspace customer IDs for the next query
             customers_string = ', '.join([f"'{customer}'" for customer in customers_list])
             # Query to retrieve customer IDs from the payments database
@@ -457,7 +454,8 @@ def get_workspaces(subscriptions=None,customers_list=None):
             # Extract the relevant columns
             final_workspaces = result_df[['id', 'name', 'identifier','customer','email'
                         ,'subscription_id','created','plan_id','status','ended_at','plan',
-                        'quantity','trial_start','trial_end','current_period_end','createdAt']]
+                        'quantity','trial_start','trial_end','current_period_end','createdAt',
+                        'priority','payment_menthod','auto_renew']]
         except Exception as get_exception:
             # Handle exceptions and print an error message
             print(f"Error in Workspaces (GET): {get_exception}")
@@ -526,7 +524,6 @@ def get_workspace_hubspot_id(customer):
     hubspotid = db.analytics_db("GET",query, None)
     return hubspotid
 
-
 def add_contact_hubspot_id(workspaces):
     """
     Add HubSpot ID to the workspace data.
@@ -541,7 +538,8 @@ def add_contact_hubspot_id(workspaces):
     final_workspaces = []
     contacts_list =  ', '.join([f"'{workspace[3]}'" for workspace in workspaces 
                                 if workspace[3] is not None])
-    query = f"""select email,"hubspotID" from contacts where email in ({contacts_list})"""
+    query = f"""select email,"hubspotID" from contacts where email in ({contacts_list}) and  email NOT ILIKE '%''%'
+              ESCAPE '#'"""
     hubspot_ids = db.analytics_db("GET",query, None)
 
     # Create a dictionary mapping payment IDs to external IDs
@@ -601,7 +599,7 @@ def delete_workspace_ids(query=None):
     print("START: Deleting workspaces on DB")
     hubspot_ids = []
     workspace_list = []
-    if query == None:
+    if query is None:
         try:
             query = "select max(created) from workspaces"
             last_sync = db.analytics_db( "GET",query, None)
@@ -652,6 +650,9 @@ def get_memberships():
             query = 'select workspace,"hubspotID" from workspaces'
             workspaces = db.analytics_db("GET",query, None)
             if len(workspaces)>0:
+                query = 'select member from memberships'
+                memberships = db.analytics_db("GET",query, None)
+                memberships_list = ', '.join([f"'{member[0]}'" for member in memberships])
 
                 workspaces_list = ', '.join([f"'{workspace[0]}'" for workspace in workspaces])
                 # Query to retrieve new memberships from the database
@@ -661,13 +662,21 @@ def get_memberships():
                     om."UserId", 
                     om."OrganizationId", 
                     om.role, 
-                    om."isPrimary", 
-                    om."isContributor", 
+                    case 
+                    when om."isPrimary" = True
+                    then 'yes'
+                    else 'no'
+                    end as "isPrimary",
+                    case 
+                    when om."isContributor" = True
+                    then 'yes'
+                    else 'no'
+                    end as "isContributor",
                     om."createdAt", 
                     u.email 
                     FROM "OrganizationMemberships" om
                     LEFT JOIN "Users" u on (u.id = om."UserId")
-                    where om."OrganizationId" in ({workspaces_list}) and role != 'guest'
+                    where om."OrganizationId" in ({workspaces_list}) and role != 'guest' and  om.id not in ({memberships_list})
                     order by om."createdAt" asc 
                 """
                 new_memberships = db.cloud_db( query, None)
@@ -694,7 +703,8 @@ def get_memberships():
                         # Create a dictionary mapping email addresses to hubspot IDs
                         contacts_dict = {email: hubspot_id for email, hubspot_id in hubspotids}
             else:
-                print("""WORKSPACES TABLE EMPTY: PLEASE RUN -- `python main.py create_all_workspaces`
+                print("""WORKSPACES TABLE EMPTY: PLEASE RUN -- 
+                `python main.py create_all_workspaces`
                             -- TO TRIGGER A FULL SYNC""")
         except Exception as get_exception:
             print(f"Error in Serials (GET): {get_exception}")
@@ -707,8 +717,16 @@ def get_memberships():
                 om."UserId", 
                 om."OrganizationId", 
                 om.role, 
-                om."isPrimary", 
-                om."isContributor", 
+                case 
+                    when om."isPrimary" = True
+                    then 'yes'
+                    else 'no'
+                    end as "isPrimary",
+                case 
+                    when om."isContributor" = True
+                    then 'yes'
+                    else 'no'
+                    end as "isContributor", 
                 om."createdAt", 
                 u.email 
                 FROM "OrganizationMemberships" om
@@ -799,8 +817,16 @@ def get_updated_memberships():
                 om."UserId", 
                 om."OrganizationId", 
                 om.role, 
-                om."isPrimary", 
-                om."isContributor", 
+                case 
+                    when om."isPrimary" = True
+                    then 'yes'
+                    else 'no'
+                    end as "isPrimary", 
+                case 
+                    when om."isContributor" = True
+                    then 'yes'
+                    else 'no'
+                    end as "isContributor",   
                 om."createdAt", 
                 u.email 
                 FROM "OrganizationMemberships" om
@@ -822,7 +848,7 @@ def get_updated_memberships():
                     sketchid = member[0]  # Assuming email is at index 1 in the new_serials tuples
                     hubspot_id = hubspot_dict.get(sketchid, None)
                     if hubspot_id is not None:
-                        final.append((*member, hubspot_id))  
+                        final.append((*member, hubspot_id))
         else:
             print("No Memberships to be updated")
 
@@ -870,3 +896,135 @@ def delete_memberships(payload):
     except Exception as get_exception:
         print(f"Error in Workspaces (DELETE): {get_exception}")
     return hubspot_ids
+
+def workspace_associations():
+    """
+    Fetches and associates workspace-related data using multiple database queries.
+
+    Returns:
+        list: A list of tuples containing associated workspace data.
+    """
+    try:
+        # Initialize lists to store data
+        workspace_email = []
+        complete = []
+
+        # Query to fetch workspaces created after a certain date
+        query = """SELECT w."hubspotID", w.workspace, w.customer as workspace 
+                        FROM workspaces w where w.created > '2023-12-17' """
+        workspaces = db.analytics_db("GET", query, None)
+
+        # Print retrieved workspaces data
+        print(workspaces)
+
+        # Create a string of workspace names for query use
+        workspaces_list = ', '.join([f"'{member[2]}'" for member in workspaces])
+
+        # Query to fetch data from another database based on workspace names
+        analytics_query = f"""SELECT id, email FROM ab_stripe.customers  
+        WHERE id IN ({workspaces_list})"""
+        workspaces_data = db.analytics_prod_db("GET", analytics_query, None)
+
+        # Print analytics query
+        print(analytics_query)
+
+        # Create a dictionary mapping payment IDs to external IDs
+        workspaces_dict = {id: external_id for id, external_id in workspaces_data}
+
+        # Join workspace data and customer IDs based on payment IDs
+        for workspace in workspaces:
+            id = workspace[2]
+            email = workspaces_dict.get(id, None)
+            if email is not None:
+                workspace_email.append((*workspace, email))
+
+        # Create a string of emails for query use
+        email_list = ', '.join([f"'{email[3]}'" for email in workspace_email])
+        print(email_list)
+
+        # Query to fetch hubspot email and IDs based on emails
+        query = f"""SELECT email, "hubspotID" FROM contacts WHERE email IN ({email_list})"""
+        hubspot_email = db.analytics_db("GET", query, None)
+
+        # Create a dictionary mapping emails to IDs
+        email_dict = {email: id for email, id in hubspot_email}
+
+        # Join workspace data and customer IDs based on emails
+        for record in workspace_email:
+            email = record[3]
+            id = email_dict.get(email, None)
+            if id is not None:
+                complete.append((*record, id))
+
+    except Exception as get_exception:
+        print(f"Error in Workspaces (ASSOCIATE): {get_exception}")
+    # Print and return the completed associations
+    return complete
+
+
+def memberships_associations():
+    """
+    Fetches and associates membership-related data using multiple database queries.
+
+    Returns:
+        list: A list of tuples containing associated membership data.
+    """
+    try:
+        # Initialize lists to store data
+        membership_email = []
+        membership_workspace = []
+        membership_all = []
+
+        # Query to fetch memberships created after a certain date
+        query = """SELECT "hubspotID", member as id FROM memberships 
+                                    WHERE created > '2023-12-17' """
+        memberships = db.analytics_db("GET", query, None)
+        memberships_list = ', '.join([f"'{member[1]}'" for member in memberships])
+        # Query to fetch membership data from another database
+        analytics_query = f"""SELECT mem.id, u.email, mem."OrganizationId"
+                            FROM cloud."OrganizationMemberships" mem
+                            LEFT JOIN cloud."Users" u ON mem."UserId" = u.id
+                            WHERE mem.id IN ({memberships_list}) AND u.email 
+                            NOT ILIKE '%''%' ESCAPE '#'"""
+        memberships_data = db.analytics_prod_db("GET", analytics_query, None)
+        memberships_all_dict = {member[1]: member[0] for member in memberships}
+
+        # Join membership data and IDs based on payment IDs
+        for member in memberships_data:
+            id = member[0]
+            hub_id = memberships_all_dict.get(id, None)
+            if hub_id is not None:
+                membership_all.append((*member, hub_id))
+
+        # Create a string of emails for query use
+        email_list = ', '.join([f"'{email[1]}'" for email in memberships_data])
+        query = f"""SELECT email, "hubspotID" FROM contacts WHERE email IN ({email_list})"""
+        hubspot_email = db.analytics_db("GET", query, None)
+        # Create a string of workspaces for query use
+        workspace_list = ', '.join([f"'{org[2]}'" for org in memberships_data])
+        query = f"""SELECT workspace, "hubspotID" FROM workspaces 
+                                WHERE workspace IN ({workspace_list})"""
+        hubspot_workspace = db.analytics_db("GET", query, None)
+
+        # Create dictionaries to map emails and workspaces to IDs
+        memberships_email_dict = {member[0]: member[1] for member in hubspot_email}
+        memberships_workspace_dict = {member[0]: member[1] for member in hubspot_workspace}
+
+        # Join membership data and customer IDs based on emails
+        for member in membership_all:
+            id = member[1]
+            email = memberships_email_dict.get(id, None)
+            if email is not None:
+                membership_email.append((*member, email))
+
+        # Join membership data and workspaces based on IDs
+        for member in membership_email:
+            id = member[2]
+            workspace = memberships_workspace_dict.get(id, None)
+            if workspace is not None:
+                membership_workspace.append((*member, workspace))
+    except Exception as get_exception:
+        print(f"Error in Workspaces (ASSOCIATE): {get_exception}")
+    
+    # Return the completed associations
+    return membership_workspace

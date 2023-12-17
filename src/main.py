@@ -93,6 +93,7 @@ def add_workspaces_workflow():
         else:
             workspaces = stripe.get_subscriptions(new_workspaces)
             workspaces_hubspot_ids = hubspot.create_workspaces(workspaces)
+            
             workspaces_complete = db.add_contact_hubspot_id(workspaces_hubspot_ids)
             db.insert_workspace_ids(workspaces_hubspot_ids)
             hubspot.workspaces_associate(workspaces_complete)
@@ -165,11 +166,13 @@ def delete_workpaces_and_memberships():
     """
     try:
         workspaces = db.delete_workspace_ids()
+        print(len(workspaces))
         if len(workspaces[0]) > 0:
             hubspot.delete_workspaces(workspaces[0])
+            hubspot.delete_memberships(hubspotids)
+
             hubspotids = db.delete_memberships(workspaces[1])
 
-            hubspot.delete_memberships(hubspotids)
     except Exception as e:
         print(f"An error occurred: {e}")
 
@@ -192,18 +195,29 @@ def update_memberships():
     except Exception as e:
         print(f"An error occurred: {e}")
 
+def associate_repair():
+    """
+    Repairs associations between workspaces and memberships in HubSpot.
+
+    Retrieves complete workspace associations from the database, associates workspaces,
+    and handles memberships associations in HubSpot.
+
+    Returns:
+        None
+    """
+    # Retrieve and associate workspaces
+    workspaces_complete = db.workspace_associations()
+    hubspot.workspaces_associate(workspaces_complete, True)
+
+    # Retrieve and associate memberships
+    memberships = db.memberships_associations()
+    hubspot.memberships_association(memberships)
+
 def main():
     """
     The main function that orchestrates the execution of various workflows.
-
-    Usage:
-        python script.py 
-
-    Commands:
-        - create_all_workspaces
     """
-    delete_workpaces_and_memberships()
-    #delete_serials_workflow()
+    # delete_workspaces_and_memberships()
     add_contacts_workflow()
     update_serials_workflow()
     add_serials_workflow()
@@ -211,13 +225,18 @@ def main():
         command = sys.argv[1]
         if command == "create_all_workspaces":
             create_all_workspaces()
+        if command == "associate":
+            print("START: Repair associations")
+            associate_repair()
         else:
             print("Invalid command. Available commands: create_all_workspaces")
     else:
-            # Default behavior when no arguments are provided
+        # Default behavior when no arguments are provided
         print("No command specified. Default behavior.")
+
     add_workspaces_workflow()
     update_memberships()
     add_memberships()
+
 if __name__ == "__main__":
     main()

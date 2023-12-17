@@ -9,7 +9,7 @@ import hubspot_api as hubspot
 
 # Load environment variables from a .env file
 load_dotenv(find_dotenv())
-api_key = os.getenv('API_KEY')
+api_key = os.getenv('STRIPE_KEY')
 stripe_secret = os.getenv('STRIPE_SECRET')
 app = Flask(__name__)
 
